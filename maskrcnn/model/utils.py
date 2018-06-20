@@ -139,7 +139,7 @@ def concatenate_detection_tensors(dets):
                 padded_dets.append(det)
         return torch.cat(padded_dets, dim=0), n_dets_per_sample
     else:
-        return example_det.new([0]), n_dets_per_sample
+        return example_det.new(0), n_dets_per_sample
 
 def concatenate_detections(*dets):
     """

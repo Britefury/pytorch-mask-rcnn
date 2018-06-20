@@ -440,10 +440,10 @@ def compute_rcnn_bbox_loss(target_bbox, target_class_ids, pred_bbox):
 
 
 def compute_faster_rcnn_losses(config, rpn_match, rpn_bbox, rpn_num_pos_per_sample, rpn_class_logits, rpn_pred_bbox,
-                               target_class_ids, rcnn_class_logits, target_deltas, rcnn_bbox, per_sample=False):
+                               target_class_ids, rcnn_class_logits, target_deltas, rcnn_bbox):
 
-    rpn_class_loss = compute_rpn_class_loss(config, rpn_match, rpn_class_logits, per_sample=per_sample)
-    rpn_bbox_loss = compute_rpn_bbox_loss(rpn_bbox, rpn_match, rpn_pred_bbox, rpn_num_pos_per_sample, per_sample=per_sample)
+    rpn_class_loss = compute_rpn_class_loss(config, rpn_match, rpn_class_logits)
+    rpn_bbox_loss = compute_rpn_bbox_loss(rpn_bbox, rpn_match, rpn_pred_bbox, rpn_num_pos_per_sample)
     rcnn_class_loss = compute_rcnn_class_loss(target_class_ids, rcnn_class_logits)
     rcnn_bbox_loss = compute_rcnn_bbox_loss(target_deltas, target_class_ids, rcnn_bbox)
 
@@ -797,6 +797,7 @@ def rcnn_detection_target_layer(proposals, prop_class_logits, prop_class, prop_b
     else:
         (rois, roi_gt_class_ids, deltas), n_dets_per_sample = concatenate_detections(
             rois, target_class_ids, target_deltas)
+
     return rois, roi_class_logits, roi_class_probs, roi_bbox_deltas, roi_gt_class_ids, deltas, n_dets_per_sample
 
 
@@ -980,15 +981,19 @@ class AbstractFasterRCNNModel (FasterRCNNBaseModel):
         rcnn_class_losses = []
         rcnn_bbox_losses = []
         for sample_i, n_targets in enumerate(n_targets_per_sample):
-            rcnn_class_loss = compute_rcnn_class_loss(
-                target_class_ids[sample_i, :n_targets], rcnn_class_logits[sample_i, :n_targets])
-            rcnn_bbox_loss = compute_rcnn_bbox_loss(
-                target_deltas[sample_i, :n_targets], target_class_ids[sample_i, :n_targets],
-                rcnn_bbox[sample_i, :n_targets])
-            rcnn_class_losses.append(rcnn_class_loss)
-            rcnn_bbox_losses.append(rcnn_bbox_loss)
-        rcnn_class_losses = torch.tensor(rcnn_class_losses, dtype=float, device=rcnn_class_logits.device)
-        rcnn_bbox_losses = torch.tensor(rcnn_bbox_losses, dtype=float, device=rcnn_bbox.device)
+            if n_targets > 0:
+                rcnn_class_loss = compute_rcnn_class_loss(
+                    target_class_ids[sample_i, :n_targets], rcnn_class_logits[sample_i, :n_targets])
+                rcnn_bbox_loss = compute_rcnn_bbox_loss(
+                    target_deltas[sample_i, :n_targets], target_class_ids[sample_i, :n_targets],
+                    rcnn_bbox[sample_i, :n_targets])
+                rcnn_class_losses.append(rcnn_class_loss[None])
+                rcnn_bbox_losses.append(rcnn_bbox_loss[None])
+            else:
+                rcnn_class_losses.append(torch.tensor([0.0], dtype=torch.float, device=molded_images.device))
+                rcnn_bbox_losses.append(torch.tensor([0.0], dtype=torch.float, device=molded_images.device))
+        rcnn_class_losses = torch.cat(rcnn_class_losses, dim=0)
+        rcnn_bbox_losses = torch.cat(rcnn_bbox_losses, dim=0)
 
         return (rpn_class_losses, rpn_bbox_losses, rcnn_class_losses, rcnn_bbox_losses)
 

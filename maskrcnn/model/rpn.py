@@ -387,9 +387,9 @@ def compute_rpn_class_loss_per_sample(config, rpn_match, rpn_class_logits):
             loss = F.binary_cross_entropy_with_logits(
                 sample_class_logits, sample_anchor_class.float())
 
-        losses.append(loss)
+        losses.append(loss[None])
 
-    return torch.tensor(losses, dtype=torch.float, device=rpn_class_logits.device)
+    return torch.cat(losses, dim=0)
 
 def compute_rpn_bbox_loss(target_bbox, rpn_match, rpn_bbox, rpn_num_pos_per_sample):
     """Return the RPN bounding box loss graph.
@@ -448,16 +448,16 @@ def compute_rpn_bbox_loss_per_sample(target_bbox, rpn_match, rpn_bbox, rpn_num_p
         indices = torch.nonzero(pos_mask[sample_i])
 
         # Pick bbox deltas that contribute to the loss
-        rpn_bbox = rpn_bbox[sample_i, indices[:, 0]]
+        sample_rpn_bbox = rpn_bbox[sample_i, indices[:, 0]]
 
-        pos_target_box = target_bbox[sample_i, :n_pos, :]
+        sample_pos_target_box = target_bbox[sample_i, :n_pos, :]
 
         # Smooth L1 loss
-        loss = F.smooth_l1_loss(rpn_bbox, pos_target_box)
+        loss = F.smooth_l1_loss(sample_rpn_bbox, sample_pos_target_box)
 
-        losses.append(loss)
+        losses.append(loss[None])
 
-    return torch.tensor(losses, dtype=torch.float, device=rpn_bbox.device)
+    return torch.cat(losses, dim=0)
 
 
 def compute_rpn_losses(config, rpn_match, rpn_bbox, rpn_num_pos_per_sample, rpn_class_logits, rpn_pred_bbox):
@@ -888,7 +888,7 @@ class AbstractRPNNModel (RPNBaseModel):
         image_size = images.shape[2:]
 
         h, w = image_size
-        scale = torch.tensor(np.array([h, w, h, w]), device=device).float()
+        scale = torch.tensor([h, w, h, w], dtype=torch.float, device=device)
 
         rpn_feature_maps, mrcnn_feature_maps, rpn_bbox_deltas, rpn_rois, roi_scores, n_rois_per_sample = self.rpn_detect_forward(
             images)
