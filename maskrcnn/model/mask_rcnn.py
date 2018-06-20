@@ -9,7 +9,8 @@ import torch.nn.functional as F
 from maskrcnn.roialign.crop_and_resize.crop_and_resize import CropAndResizeAligned
 from .utils import not_empty, is_empty, box_refinement, SamePad2d, concatenate_detections, flatten_detections,\
     unflatten_detections, split_detections
-from .rpn import RPNHead, compute_rpn_class_loss, compute_rpn_bbox_loss, alt_forward_method
+from .rpn import RPNHead, compute_rpn_class_loss, compute_rpn_class_loss_per_sample, \
+    compute_rpn_bbox_loss, compute_rpn_bbox_loss_per_sample, alt_forward_method
 from .rcnn import RCNNHead, FasterRCNNBaseModel, detection_layer, pyramid_roi_align, compute_rcnn_bbox_loss,\
     compute_rcnn_class_loss, bbox_overlaps
 
@@ -564,8 +565,7 @@ class AbstractMaskRCNNModel (FasterRCNNBaseModel):
                              config.ROI_ALIGN_FUNCTION, config.ROI_ALIGN_SAMPLING_RATIO)
 
 
-    @alt_forward_method
-    def train_forward(self, molded_images, gt_class_ids, gt_boxes, gt_masks, n_gts_per_sample, hard_negative_mining=False):
+    def _train_forward(self, molded_images, gt_class_ids, gt_boxes, gt_masks, n_gts_per_sample, hard_negative_mining=False):
         device = molded_images.device
 
         # Get image size
@@ -634,11 +634,55 @@ class AbstractMaskRCNNModel (FasterRCNNBaseModel):
                 # Create masks for detections
                 mrcnn_mask = self.mask(mrcnn_feature_maps, rois, n_targets_per_sample, image_size)
 
+        return [rpn_class_logits, rpn_bbox, target_class_ids, mrcnn_class_logits,
+                target_deltas, mrcnn_bbox, target_mask, mrcnn_mask, n_targets_per_sample]
+
+
+    @alt_forward_method
+    def train_forward(self, molded_images, gt_class_ids, gt_boxes, gt_masks, n_gts_per_sample, hard_negative_mining=False):
+        (rpn_class_logits, rpn_bbox, target_class_ids, mrcnn_class_logits,
+            target_deltas, mrcnn_bbox, target_mask, mrcnn_mask, n_targets_per_sample) = self._train_forward(
+                    molded_images, gt_class_ids, gt_boxes, gt_masks, n_gts_per_sample,
+                    hard_negative_mining=hard_negative_mining)
+
         target_class_ids, mrcnn_class_logits, target_deltas, mrcnn_bbox, target_mask, mrcnn_mask = \
             flatten_detections(n_targets_per_sample, target_class_ids, mrcnn_class_logits, target_deltas, mrcnn_bbox, target_mask, mrcnn_mask)
 
-        return [rpn_class_logits, rpn_bbox, target_class_ids, mrcnn_class_logits,
-                target_deltas, mrcnn_bbox, target_mask, mrcnn_mask, n_targets_per_sample]
+        return (rpn_class_logits, rpn_bbox, target_class_ids, mrcnn_class_logits,
+                target_deltas, mrcnn_bbox, target_mask, mrcnn_mask, n_targets_per_sample)
+
+
+    @alt_forward_method
+    def train_loss_forward(self, molded_images, rpn_target_match, rpn_target_bbox, rpn_num_pos,
+                           gt_class_ids, gt_boxes, gt_masks, n_gts_per_sample, hard_negative_mining=False):
+        (rpn_class_logits, rpn_pred_bbox, target_class_ids, rcnn_class_logits,
+            target_deltas, rcnn_bbox, target_mask, mrcnn_mask, n_targets_per_sample) = self._train_forward(
+                    molded_images, gt_class_ids, gt_boxes, gt_masks, n_gts_per_sample,
+                    hard_negative_mining=hard_negative_mining)
+
+        rpn_class_losses = compute_rpn_class_loss_per_sample(self.config, rpn_target_match, rpn_class_logits)
+        rpn_bbox_losses = compute_rpn_bbox_loss_per_sample(rpn_target_bbox, rpn_target_match, rpn_pred_bbox,
+                                                           rpn_num_pos)
+        rcnn_class_losses = []
+        rcnn_bbox_losses = []
+        mrcnn_mask_losses = []
+        for sample_i, n_targets in enumerate(n_targets_per_sample):
+            rcnn_class_loss = compute_rcnn_class_loss(
+                target_class_ids[sample_i, :n_targets], rcnn_class_logits[sample_i, :n_targets])
+            rcnn_bbox_loss = compute_rcnn_bbox_loss(
+                target_deltas[sample_i, :n_targets], target_class_ids[sample_i, :n_targets],
+                rcnn_bbox[sample_i, :n_targets])
+            mrcnn_mask_loss = compute_mrcnn_mask_loss(
+                target_mask[sample_i, :n_targets], target_class_ids[sample_i, :n_targets],
+                mrcnn_mask[sample_i, :n_targets])
+            rcnn_class_losses.append(rcnn_class_loss)
+            rcnn_bbox_losses.append(rcnn_bbox_loss)
+            mrcnn_mask_losses.append(mrcnn_mask_loss)
+        rcnn_class_losses = torch.tensor(rcnn_class_losses, dtype=float, device=rcnn_class_logits.device)
+        rcnn_bbox_losses = torch.tensor(rcnn_bbox_losses, dtype=float, device=rcnn_bbox.device)
+        mrcnn_mask_losses = torch.tensor(mrcnn_mask_losses, dtype=float, device=rcnn_bbox.device)
+
+        return (rpn_class_losses, rpn_bbox_losses, rcnn_class_losses, rcnn_bbox_losses, mrcnn_mask_losses)
 
 
     def mask_detect_forward(self, images, mrcnn_feature_maps, det_boxes, n_dets_per_sample):
