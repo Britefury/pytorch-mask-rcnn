@@ -10,8 +10,7 @@ from maskrcnn.roialign.roi_align.roi_align import RoIAlign
 from .utils import not_empty, is_empty, log2, intersect1d, unique1d, box_refinement, split_detections
 from .utils import flatten_detections_with_sample_indices, flatten_detections
 from .utils import unflatten_detections, concatenate_detections, plot_image_with_stratified_boxes
-from .rpn import apply_box_deltas, compute_rpn_class_loss, compute_rpn_class_loss_per_sample, \
-    compute_rpn_bbox_loss, compute_rpn_bbox_loss_per_sample
+from .rpn import apply_box_deltas, compute_rpn_losses, compute_rpn_losses_per_sample
 from .rpn import RPNBaseModel, alt_forward_method
 
 
@@ -441,9 +440,9 @@ def compute_rcnn_bbox_loss(target_bbox, target_class_ids, pred_bbox):
 
 def compute_faster_rcnn_losses(config, rpn_match, rpn_bbox, rpn_num_pos_per_sample, rpn_class_logits, rpn_pred_bbox,
                                target_class_ids, rcnn_class_logits, target_deltas, rcnn_bbox):
+    rpn_class_loss, rpn_bbox_loss = compute_rpn_losses(
+        config, rpn_match, rpn_class_logits, rpn_bbox, rpn_pred_bbox, rpn_num_pos_per_sample)
 
-    rpn_class_loss = compute_rpn_class_loss(config, rpn_match, rpn_class_logits)
-    rpn_bbox_loss = compute_rpn_bbox_loss(rpn_bbox, rpn_match, rpn_pred_bbox, rpn_num_pos_per_sample)
     rcnn_class_loss = compute_rcnn_class_loss(target_class_ids, rcnn_class_logits)
     rcnn_bbox_loss = compute_rcnn_bbox_loss(target_deltas, target_class_ids, rcnn_bbox)
 
@@ -975,18 +974,18 @@ class AbstractFasterRCNNModel (FasterRCNNBaseModel):
             n_targets_per_sample = self._train_forward(molded_images, gt_class_ids, gt_boxes, n_gts_per_sample,
                                    hard_negative_mining=hard_negative_mining)
 
-        rpn_class_losses = compute_rpn_class_loss_per_sample(self.config, rpn_target_match, rpn_class_logits)
-        rpn_bbox_losses = compute_rpn_bbox_loss_per_sample(rpn_target_bbox, rpn_target_match, rpn_pred_bbox,
-                                                           rpn_num_pos)
+        rpn_class_losses, rpn_bbox_losses = compute_rpn_losses_per_sample(
+            self.config, rpn_target_match, rpn_class_logits, rpn_target_bbox, rpn_pred_bbox, rpn_num_pos)
+
         rcnn_class_losses = []
         rcnn_bbox_losses = []
         for sample_i, n_targets in enumerate(n_targets_per_sample):
             if n_targets > 0:
                 rcnn_class_loss = compute_rcnn_class_loss(
-                    target_class_ids[sample_i, :n_targets], rcnn_class_logits[sample_i, :n_targets])
+                    target_class_ids[sample_i, :n_targets], rcnn_class_logits[sample_i, :n_targets, :])
                 rcnn_bbox_loss = compute_rcnn_bbox_loss(
-                    target_deltas[sample_i, :n_targets], target_class_ids[sample_i, :n_targets],
-                    rcnn_bbox[sample_i, :n_targets])
+                    target_deltas[sample_i, :n_targets, :], target_class_ids[sample_i, :n_targets],
+                    rcnn_bbox[sample_i, :n_targets, :])
                 rcnn_class_losses.append(rcnn_class_loss[None])
                 rcnn_bbox_losses.append(rcnn_bbox_loss[None])
             else:

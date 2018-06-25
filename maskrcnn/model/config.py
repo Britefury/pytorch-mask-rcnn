@@ -71,8 +71,11 @@ class Config(object):
     # Number of hidden channels in RPN
     RPN_HIDDEN_CHANNELS = 256
 
-    # Use softmax instead of sigmoid in RPN objectness
-    RPN_OBJECTNESS_SOFTMAX = False
+    # RPN Objectness function
+    # 'sigmoid' - single logit, sigmoid non-linearity, binary cross-entropy loss
+    # 'softmax' - 2 logits, softmax non-linearity, categorical cross-entropy loss
+    # 'focal' - 2 logits, softmax non-linearity, focal loss
+    RPN_OBJECTNESS_FUNCTION = 'sigmoid'
 
     # Length of square anchor side in pixels
     RPN_ANCHOR_SCALES = (32, 64, 128, 256, 512)
@@ -100,7 +103,11 @@ class Config(object):
     # How many anchors per image to use for RPN training
     RPN_TRAIN_ANCHORS_PER_IMAGE = 256
 
-    # If True, filter RPN proposals separately by level
+    # Focal loss hyper-parameters
+    RPN_FOCAL_LOSS_EXPONENT = 2.0
+    RPN_FOCAL_LOSS_POS_CLS_WEIGHT = 0.25
+
+    # If True, filter RPN proposals (NMS, etc.) separately by level
     RPN_FILTER_PROPOSALS_BY_LEVEL = False
 
     # Bounding box refinement standard deviation for RPN
@@ -199,3 +206,11 @@ class Config(object):
             if not a.startswith("__") and not callable(getattr(self, a)):
                 print("{:30} {}".format(a, getattr(self, a)))
         print("\n")
+
+
+    @property
+    def n_rpn_logits_per_anchor(self):
+        if self.RPN_OBJECTNESS_FUNCTION == 'sigmoid':
+            return 1
+        else:
+            return 2

@@ -37,11 +37,12 @@ class RPNHead (nn.Module):
             self.padding = SamePad2d(kernel_size=3, stride=self.anchor_stride)
             self.conv_shared = nn.Conv2d(self.depth, config.RPN_HIDDEN_CHANNELS, kernel_size=3, stride=self.anchor_stride)
         self.relu = nn.ReLU(inplace=True)
-        if config.RPN_OBJECTNESS_SOFTMAX:
-            self.conv_class = nn.Conv2d(config.RPN_HIDDEN_CHANNELS, 2 * anchors_per_location, kernel_size=1, stride=1)
+        self.conv_class = nn.Conv2d(config.RPN_HIDDEN_CHANNELS,
+                                    config.n_rpn_logits_per_anchor * anchors_per_location,
+                                    kernel_size=1, stride=1)
+        if config.RPN_OBJECTNESS_FUNCTION in {'softmax', 'focal'}:
             self.softmax = nn.Softmax(dim=2)
         else:
-            self.conv_class = nn.Conv2d(config.RPN_HIDDEN_CHANNELS, anchors_per_location, kernel_size=1, stride=1)
             self.softmax = None
         self.conv_bbox = nn.Conv2d(config.RPN_HIDDEN_CHANNELS, 4 * anchors_per_location, kernel_size=1, stride=1)
 
@@ -154,10 +155,10 @@ def proposal_layer_one_sample(rpn_pred_probs, rpn_box_deltas, proposal_count, nm
 
     :param rpn_pred_probs: predicted background/foreground probabilities from region proposal network RPN
         Either:
-            (anchors, 2) array  where the last dimension is [bg_prob, fg_prob] if
-            `config.RPN_OBJECTNESS_SOFTMAX`
+            (anchors,) array  where the last dimension is [fg_prob] if
+                `config.RPN_OBJECTNESS_FUNCTION == 'sigmoid'`
+            else (anchors, 2) array  where the last dimension is [bg_prob, fg_prob]
         Or:
-            (anchors,) array  where the last dimension is [fg_prob]
     :param rpn_box_deltas: predicted bounding box deltas from region proposal network RPN
         (anchors, 4) array  where the last dimension is [dy, dx, log(dh), log(dw)]
     :param proposal_count: maximum number of proposals to be generated
@@ -173,7 +174,7 @@ def proposal_layer_one_sample(rpn_pred_probs, rpn_box_deltas, proposal_count, nm
     device = rpn_pred_probs.device
 
     # Select scores and deltas corresponding to valid anchors
-    if config.RPN_OBJECTNESS_SOFTMAX:
+    if config.n_rpn_logits_per_anchor == 2:
         # Box Scores. Use the foreground class confidence. [Batch, num_rois, 1]
         scores = rpn_pred_probs[:, 1]
     else:
@@ -312,12 +313,41 @@ def proposal_layer_by_level(rpn_pred_probs_by_lvl, rpn_box_deltas_by_lvl, propos
 #  Loss Functions
 ############################################################
 
-def compute_rpn_class_loss(config, rpn_match, rpn_class_logits):
+RPN_CLS_POSITIVE = 1
+RPN_CLS_NEGATIVE = -1
+RPN_CLS_NEUTRAL = 0
+
+def focal_loss(class_logits, targets, num_pos_samples, weight=1.0, alpha=0.25, gamma=2.0):
+    # One hot representation of targets
+    targets_one_hot = torch.zeros_like(class_logits)
+    targets_one_hot.scatter_(1, targets[:, None], 1)
+
+    # Probabilities, clamp to prevent log(0)
+    class_prob = F.softmax(class_logits, dim=1)
+    # p_t = p if target == 1
+    # p_t = (1 - p) if target == 0
+    class_prob_t = class_prob * targets_one_hot + (1.0 - class_prob) * (1.0 - targets_one_hot)
+
+    # alpha if target == 1
+    # (1 - alpha) if target == 0
+    sample_weight = (alpha * targets_one_hot + (1.0 - alpha) * (1.0 - targets_one_hot)) * weight
+    # weight = w * (1 - p_t)**gamma
+    sample_weight = sample_weight * (1.0 - class_prob_t).pow(gamma).detach()
+    return F.binary_cross_entropy_with_logits(class_logits, targets_one_hot, weight=sample_weight,
+                                              size_average=False) / num_pos_samples
+
+
+def compute_rpn_losses(config, rpn_match, rpn_class_logits, target_bbox, rpn_bbox,
+                       rpn_num_pos_per_sample):
     """RPN anchor classifier loss.
 
     rpn_match: [batch, anchors, 1]. Anchor match type. 1=positive,
                -1=negative, 0=neutral anchor.
     rpn_class_logits: [batch, anchors, 2]. RPN classifier logits for FG/BG.
+    target_bbox: [batch, max positive anchors, (dy, dx, log(dh), log(dw))].
+        Uses 0 padding to fill in unsed bbox deltas.
+    rpn_bbox: [batch, anchors, (dy, dx, log(dh), log(dw))]
+    rpn_num_pos_per_sample: [batch] number of positives per sample
     """
 
     if len(rpn_match.size()) == 3:
@@ -325,36 +355,68 @@ def compute_rpn_class_loss(config, rpn_match, rpn_class_logits):
         rpn_match = rpn_match.squeeze(2)
 
     # Get anchor classes. Convert the -1/+1 match to 0/1 values.
-    anchor_class = (rpn_match == 1).long()
+    anchor_class = (rpn_match == RPN_CLS_POSITIVE).long()
 
-    # Positive and Negative anchors contribute to the loss,
-    # but neutral anchors (match value = 0) don't.
-    indices = torch.nonzero(rpn_match != 0)
+    if config.RPN_TRAIN_ANCHORS_PER_IMAGE is None:
+        # No sample balancing; use all samples, so don't select
+        rpn_class_logits = rpn_class_logits.view(-1, rpn_class_logits.shape[-1])
+        anchor_class = anchor_class.view(-1)
+        weight = (rpn_match != RPN_CLS_NEUTRAL).view(-1)[:, None].float()
 
-    if config.RPN_OBJECTNESS_SOFTMAX:
-        # Pick rows that contribute to the loss and filter out the rest.
-        rpn_class_logits = rpn_class_logits[indices[:, 0], indices[:, 1], :]
-        anchor_class = anchor_class[indices[:, 0], indices[:, 1]]
-
-        # Cross-entropy loss
-        loss = F.cross_entropy(rpn_class_logits, anchor_class)
+        tgt_box_for_loss = target_bbox.view(-1, 4)
+        rpn_box_for_loss = rpn_bbox.view(-1, 4)
     else:
+        # Positive and Negative anchors contribute to the loss,
+        # but neutral anchors don't.
+        indices = torch.nonzero(rpn_match != RPN_CLS_NEUTRAL)
+        pos_indices = torch.nonzero(anchor_class)
+
         # Pick rows that contribute to the loss and filter out the rest.
-        rpn_class_logits = rpn_class_logits[indices[:, 0], indices[:, 1]]
+        rpn_class_logits = rpn_class_logits[indices[:, 0], indices[:, 1], ...]
         anchor_class = anchor_class[indices[:, 0], indices[:, 1]]
+        weight = 1.0
 
+        tgt_box_for_loss = []
+        for sample_i, n_pos in enumerate(rpn_num_pos_per_sample):
+            if n_pos > 0:
+                tgt_box_for_loss.append(target_bbox[sample_i, :n_pos, :])
+        tgt_box_for_loss = torch.cat(tgt_box_for_loss, dim=0)
+        rpn_box_for_loss = rpn_bbox[pos_indices[:, 0], pos_indices[:, 1]]
+
+    if config.RPN_OBJECTNESS_FUNCTION == 'sigmoid':
         # Binary cross-entropy loss
-        loss = F.binary_cross_entropy_with_logits(
-            rpn_class_logits, anchor_class.float())
+        cls_loss = F.binary_cross_entropy_with_logits(
+            rpn_class_logits, anchor_class.float(), weight=weight)
+        box_loss = (F.smooth_l1_loss(rpn_box_for_loss, tgt_box_for_loss, reduce=False) * weight).mean()
+    elif config.RPN_OBJECTNESS_FUNCTION == 'softmax':
+        # Cross-entropy loss
+        cls_loss = F.cross_entropy(rpn_class_logits, anchor_class, weight=weight)
+        box_loss = (F.smooth_l1_loss(rpn_box_for_loss, tgt_box_for_loss, reduce=False) * weight).mean()
+    elif config.RPN_OBJECTNESS_FUNCTION == 'focal':
+        # Focal loss
+        num_pos = anchor_class.sum().float()
+        cls_loss = focal_loss(rpn_class_logits, anchor_class, num_pos,
+                              weight=weight, alpha=config.RPN_FOCAL_LOSS_POS_CLS_WEIGHT,
+                              gamma=config.RPN_FOCAL_LOSS_EXPONENT)
+        box_loss = (F.smooth_l1_loss(rpn_box_for_loss, tgt_box_for_loss, reduce=False) * weight).sum() / num_pos
+    else:
+        raise ValueError('Invalid value {} for config.RPN_OBJECTNESS_FUNCTION'.format(
+            config.RPN_OBJECTNESS_FUNCTION))
 
-        return loss
 
-def compute_rpn_class_loss_per_sample(config, rpn_match, rpn_class_logits):
+    return cls_loss, box_loss
+
+def compute_rpn_losses_per_sample(config, rpn_match, rpn_class_logits, target_bbox, rpn_bbox,
+                                  rpn_num_pos_per_sample):
     """RPN anchor classifier loss.
 
     rpn_match: [batch, anchors, 1]. Anchor match type. 1=positive,
                -1=negative, 0=neutral anchor.
     rpn_class_logits: [batch, anchors, 2]. RPN classifier logits for FG/BG.
+    target_bbox: [batch, max positive anchors, (dy, dx, log(dh), log(dw))].
+        Uses 0 padding to fill in unsed bbox deltas.
+    rpn_bbox: [batch, anchors, (dy, dx, log(dh), log(dw))]
+    rpn_num_pos_per_sample: [batch] number of positives per sample
     """
 
     if len(rpn_match.size()) == 3:
@@ -362,117 +424,80 @@ def compute_rpn_class_loss_per_sample(config, rpn_match, rpn_class_logits):
         rpn_match = rpn_match.squeeze(2)
 
     # Get anchor classes. Convert the -1/+1 match to 0/1 values.
-    anchor_class = (rpn_match == 1).long()
+    anchor_class = (rpn_match == RPN_CLS_POSITIVE).long()
 
     # Positive and Negative anchors contribute to the loss,
-    # but neutral anchors (match value = 0) don't.
-    non_neutral = rpn_match != 0
-    losses = []
-    for sample_i in range(rpn_class_logits.shape[0]):
-        indices = torch.nonzero(non_neutral[sample_i])
+    # but neutral anchors don't.
+    non_neutral = rpn_match != RPN_CLS_NEUTRAL
+    cls_losses = []
+    box_losses = []
+    for sample_i, n_pos in enumerate(rpn_num_pos_per_sample):
+        if config.RPN_TRAIN_ANCHORS_PER_IMAGE is None:
+            # No sample balancing; use all samples, so don't select
+            sample_class_logits = rpn_class_logits[sample_i]
+            sample_anchor_class = anchor_class[sample_i]
+            weight = non_neutral[sample_i].float()[:, None]
 
-        if config.RPN_OBJECTNESS_SOFTMAX:
-            # Pick rows that contribute to the loss and filter out the rest.
-            sample_class_logits = rpn_class_logits[sample_i, indices[:, 0], :]
-            sample_anchor_class = anchor_class[sample_i, indices[:, 0]]
-
-            # Cross-entropy loss
-            loss = F.cross_entropy(sample_class_logits, sample_anchor_class)
+            if n_pos > 0:
+                sample_rpn_bbox = rpn_bbox[sample_i, :]
+                sample_pos_target_box = target_bbox[sample_i, :, :]
+            else:
+                sample_rpn_bbox = sample_pos_target_box = None
         else:
+            indices = torch.nonzero(non_neutral[sample_i])
+            pos_indices = torch.nonzero(anchor_class[sample_i])
+
             # Pick rows that contribute to the loss and filter out the rest.
-            sample_class_logits = rpn_class_logits[sample_i, indices[:, 0]]
+            sample_class_logits = rpn_class_logits[sample_i, indices[:, 0], ...]
             sample_anchor_class = anchor_class[sample_i, indices[:, 0]]
+            weight = 1.0
 
+            if n_pos > 0:
+                sample_rpn_bbox = rpn_bbox[sample_i, pos_indices[:, 0]]
+                sample_pos_target_box = target_bbox[sample_i, :n_pos, :]
+            else:
+                sample_rpn_bbox = sample_pos_target_box = None
+
+        if config.RPN_OBJECTNESS_FUNCTION == 'sigmoid':
             # Binary cross-entropy loss
-            loss = F.binary_cross_entropy_with_logits(
-                sample_class_logits, sample_anchor_class.float())
+            cls_loss = F.binary_cross_entropy_with_logits(
+                sample_class_logits, sample_anchor_class.float(), weight=weight)
+            if n_pos > 0:
+                box_loss = (F.smooth_l1_loss(sample_rpn_bbox, sample_pos_target_box, reduce=False) * weight).mean()
+            else:
+                box_loss = torch.tensor(0.0, dtype=torch.float, device=rpn_bbox.device)
+        elif config.RPN_OBJECTNESS_FUNCTION == 'softmax':
+            # Cross-entropy loss
+            cls_loss = F.cross_entropy(sample_class_logits, sample_anchor_class, weight=weight)
+            if n_pos > 0:
+                box_loss = (F.smooth_l1_loss(sample_rpn_bbox, sample_pos_target_box, reduce=False) * weight).mean()
+            else:
+                box_loss = torch.tensor(0.0, dtype=torch.float, device=rpn_bbox.device)
+        elif config.RPN_OBJECTNESS_FUNCTION == 'focal':
+            # Cross-entropy loss
+            num_pos = sample_anchor_class.sum().float()
+            cls_loss = focal_loss(sample_class_logits, sample_anchor_class, num_pos,
+                              weight=weight, alpha=config.RPN_FOCAL_LOSS_POS_CLS_WEIGHT,
+                              gamma=config.RPN_FOCAL_LOSS_EXPONENT)
+            if n_pos > 0:
+                box_loss = (F.smooth_l1_loss(sample_rpn_bbox, sample_pos_target_box, reduce=False) * weight).sum() / num_pos
+            else:
+                box_loss = torch.tensor(0.0, dtype=torch.float, device=rpn_bbox.device)
+        else:
+            raise ValueError('Invalid value {} for config.RPN_OBJECTNESS_FUNCTION'.format(
+                config.RPN_OBJECTNESS_FUNCTION))
 
-        losses.append(loss[None])
+        cls_losses.append(cls_loss[None])
+        box_losses.append(box_loss[None])
 
-    return torch.cat(losses, dim=0)
-
-def compute_rpn_bbox_loss(target_bbox, rpn_match, rpn_bbox, rpn_num_pos_per_sample):
-    """Return the RPN bounding box loss graph.
-
-    target_bbox: [batch, max positive anchors, (dy, dx, log(dh), log(dw))].
-        Uses 0 padding to fill in unsed bbox deltas.
-    rpn_match: [batch, anchors, 1]. Anchor match type. 1=positive,
-               -1=negative, 0=neutral anchor.
-    rpn_bbox: [batch, anchors, (dy, dx, log(dh), log(dw))]
-    rpn_num_pos_per_sample: [batch] number of positives per sample
-    """
-
-    if len(rpn_match.size()) == 3:
-        # Squeeze last dim to simplify
-        rpn_match = rpn_match.squeeze(2)
-
-   # Positive anchors contribute to the loss, but negative and
-    # neutral anchors (match value of 0 or -1) don't.
-    indices = torch.nonzero(rpn_match==1)
-
-    # Pick bbox deltas that contribute to the loss
-    rpn_bbox = rpn_bbox[indices[:,0],indices[:,1]]
-
-    pos_target_box = []
-    for sample_i, n_pos in enumerate(rpn_num_pos_per_sample):
-        if n_pos > 0:
-            pos_target_box.append(target_bbox[sample_i, :n_pos, :])
-    pos_target_box = torch.cat(pos_target_box, dim=0)
-
-    # Smooth L1 loss
-    loss = F.smooth_l1_loss(rpn_bbox, pos_target_box)
-
-    return loss
-
-def compute_rpn_bbox_loss_per_sample(target_bbox, rpn_match, rpn_bbox, rpn_num_pos_per_sample):
-    """Return the RPN bounding box loss graph.
-
-    target_bbox: [batch, max positive anchors, (dy, dx, log(dh), log(dw))].
-        Uses 0 padding to fill in unsed bbox deltas.
-    rpn_match: [batch, anchors, 1]. Anchor match type. 1=positive,
-               -1=negative, 0=neutral anchor.
-    rpn_bbox: [batch, anchors, (dy, dx, log(dh), log(dw))]
-    rpn_num_pos_per_sample: [batch] number of positives per sample
-    """
-
-    if len(rpn_match.size()) == 3:
-        # Squeeze last dim to simplify
-        rpn_match = rpn_match.squeeze(2)
-
-    # Positive anchors contribute to the loss, but negative and
-    # neutral anchors (match value of 0 or -1) don't.
-    pos_mask = rpn_match == 1
-
-    losses = []
-    for sample_i, n_pos in enumerate(rpn_num_pos_per_sample):
-        indices = torch.nonzero(pos_mask[sample_i])
-
-        # Pick bbox deltas that contribute to the loss
-        sample_rpn_bbox = rpn_bbox[sample_i, indices[:, 0]]
-
-        sample_pos_target_box = target_bbox[sample_i, :n_pos, :]
-
-        # Smooth L1 loss
-        loss = F.smooth_l1_loss(sample_rpn_bbox, sample_pos_target_box)
-
-        losses.append(loss[None])
-
-    return torch.cat(losses, dim=0)
-
-
-def compute_rpn_losses(config, rpn_match, rpn_bbox, rpn_num_pos_per_sample, rpn_class_logits, rpn_pred_bbox):
-
-    rpn_class_loss = compute_rpn_class_loss(config, rpn_match, rpn_class_logits)
-    rpn_bbox_loss = compute_rpn_bbox_loss(rpn_bbox, rpn_match, rpn_pred_bbox, rpn_num_pos_per_sample)
-
-    return [rpn_class_loss, rpn_bbox_loss]
+    return torch.cat(cls_losses, dim=0), torch.cat(box_losses, dim=0)
 
 
 ############################################################
 #  Target generation
 ############################################################
 
-def build_rpn_targets(image_shape, anchors, valid_anchors_mask, gt_class_ids, gt_boxes, config):
+def build_rpn_targets_balanced(image_shape, anchors, valid_anchors_mask, gt_class_ids, gt_boxes, config):
     """Given the anchors and GT boxes, compute overlaps and identify positive
     anchors and deltas to refine them to match their corresponding GT boxes.
 
@@ -490,14 +515,14 @@ def build_rpn_targets(image_shape, anchors, valid_anchors_mask, gt_class_ids, gt
 
     # RPN Match: 1 = positive anchor, -1 = negative anchor, 0 = neutral
     valid_anchors = anchors[valid_anchors_mask]
-    rpn_match = np.zeros([len(valid_anchors)], dtype=np.int32)
+    rpn_match = np.full([len(valid_anchors)], RPN_CLS_NEUTRAL, dtype=np.int32)
     # RPN bounding boxes: [max anchors per image, (dy, dx, log(dh), log(dw))]
     rpn_bbox = np.zeros((config.RPN_TRAIN_ANCHORS_PER_IMAGE, 4))
 
     if len(gt_boxes) == 0:
         # Special case
         rpn_match_all = np.zeros([len(valid_anchors_mask)], dtype=np.int32)
-        rpn_match_all.fill(-1)
+        rpn_match_all.fill(RPN_CLS_NEGATIVE)
         return rpn_match_all, rpn_bbox, 0
 
     # Handle COCO crowds
@@ -533,34 +558,34 @@ def build_rpn_targets(image_shape, anchors, valid_anchors_mask, gt_class_ids, gt
     # matched to them. Skip boxes in crowd areas.
     anchor_iou_argmax = np.argmax(overlaps, axis=1)
     anchor_iou_max = overlaps[np.arange(overlaps.shape[0]), anchor_iou_argmax]
-    rpn_match[(anchor_iou_max < 0.3) & (no_crowd_bool)] = -1
+    rpn_match[(anchor_iou_max < 0.3) & (no_crowd_bool)] = RPN_CLS_NEGATIVE
     # 2. Set an anchor for each GT box (regardless of IoU value).
     # TODO: If multiple anchors have the same IoU match all of them
     gt_iou_argmax = np.argmax(overlaps, axis=0)
-    rpn_match[gt_iou_argmax] = 1
+    rpn_match[gt_iou_argmax] = RPN_CLS_POSITIVE
     # 3. Set anchors with high overlap as positive.
-    rpn_match[anchor_iou_max >= 0.7] = 1
+    rpn_match[anchor_iou_max >= 0.7] = RPN_CLS_POSITIVE
 
     # Subsample to balance positive and negative anchors
     # Don't let positives be more than half the anchors
-    ids = np.where(rpn_match == 1)[0]
+    ids = np.where(rpn_match == RPN_CLS_POSITIVE)[0]
     extra = len(ids) - (config.RPN_TRAIN_ANCHORS_PER_IMAGE // 2)
     if extra > 0:
         # Reset the extra ones to neutral
         ids = np.random.choice(ids, extra, replace=False)
-        rpn_match[ids] = 0
+        rpn_match[ids] = RPN_CLS_NEUTRAL
     # Same for negative proposals
-    ids = np.where(rpn_match == -1)[0]
+    ids = np.where(rpn_match == RPN_CLS_NEGATIVE)[0]
     extra = len(ids) - (config.RPN_TRAIN_ANCHORS_PER_IMAGE -
-                        np.sum(rpn_match == 1))
+                        np.sum(rpn_match == RPN_CLS_POSITIVE))
     if extra > 0:
-        # Rest the extra ones to neutral
+        # Reset the extra ones to neutral
         ids = np.random.choice(ids, extra, replace=False)
-        rpn_match[ids] = 0
+        rpn_match[ids] = RPN_CLS_NEUTRAL
 
     # For positive anchors, compute shift and scale needed to transform them
     # to match the corresponding GT boxes.
-    ids = np.where(rpn_match == 1)[0]
+    ids = np.where(rpn_match == RPN_CLS_POSITIVE)[0]
     ix = 0  # index into rpn_bbox
     # TODO: use box_refinment() rather than duplicating the code here
     for i, a in zip(ids, valid_anchors[ids]):
@@ -596,7 +621,117 @@ def build_rpn_targets(image_shape, anchors, valid_anchors_mask, gt_class_ids, gt
 
     rpn_match_all[valid_anchors_mask] = rpn_match
 
-    return rpn_match_all, rpn_bbox, np.count_nonzero(rpn_match == 1)
+    return rpn_match_all, rpn_bbox, np.count_nonzero(rpn_match == RPN_CLS_POSITIVE)
+
+
+def build_rpn_targets_all(image_shape, anchors, valid_anchors_mask, gt_class_ids, gt_boxes, config):
+    """Given the anchors and GT boxes, compute overlaps and identify positive
+    anchors and deltas to refine them to match their corresponding GT boxes.
+
+    anchors: [num_anchors, (y1, x1, y2, x2)]
+    valid_anchors_mask: [num_anchors]
+    gt_class_ids: [num_gt_boxes] Integer class IDs.
+    gt_boxes: [num_gt_boxes, (y1, x1, y2, x2)]
+
+    Returns:
+    rpn_match: [N] (int32) matches between anchors and GT boxes.
+               1 = positive anchor, -1 = negative anchor, 0 = neutral
+    rpn_bbox: [N, (dy, dx, log(dh), log(dw))] Anchor bbox deltas.
+    """
+
+    # RPN Match: 1 = positive anchor, -1 = negative anchor, 0 = neutral
+    valid_anchors = anchors[valid_anchors_mask]
+    rpn_match = np.full([len(valid_anchors)], RPN_CLS_NEUTRAL, dtype=np.int32)
+    # RPN bounding boxes: [n_anchors, (dy, dx, log(dh), log(dw))]
+    rpn_bbox = np.zeros([len(valid_anchors), 4])
+
+    if len(gt_boxes) == 0:
+        # Special case
+        rpn_match_all = np.zeros([len(valid_anchors_mask)], dtype=np.int32)
+        rpn_match_all.fill(-1)
+        rpn_bbox_all =  np.zeros([len(valid_anchors_mask), 4], dtype=np.float32)
+        return rpn_match_all, rpn_bbox_all, 0
+
+    # Handle COCO crowds
+    # A crowd box in COCO is a bounding box around several instances. Exclude
+    # them from training. A crowd box is given a negative class ID.
+    crowd_ix = np.where(gt_class_ids < 0)[0]
+    if crowd_ix.shape[0] > 0:
+        # Filter out crowds from ground truth class IDs and boxes
+        non_crowd_ix = np.where(gt_class_ids > 0)[0]
+        crowd_boxes = gt_boxes[crowd_ix]
+        gt_class_ids = gt_class_ids[non_crowd_ix]
+        gt_boxes = gt_boxes[non_crowd_ix]
+        # Compute overlaps with crowd boxes [anchors, crowds]
+        crowd_overlaps = compute_overlaps(valid_anchors, crowd_boxes)
+        crowd_iou_max = np.amax(crowd_overlaps, axis=1)
+        no_crowd_bool = (crowd_iou_max < 0.001)
+    else:
+        # All valid_anchors don't intersect a crowd
+        no_crowd_bool = np.ones([len(valid_anchors)], dtype=bool)
+
+    # Compute overlaps [num_anchors, num_gt_boxes]
+    overlaps = compute_overlaps(valid_anchors, gt_boxes)
+
+    # Match anchors to GT Boxes
+    # If an anchor overlaps a GT box with IoU >= 0.7 then it's positive.
+    # If an anchor overlaps a GT box with IoU < 0.3 then it's negative.
+    # Neutral anchors are those that don't match the conditions above,
+    # and they don't influence the loss function.
+    # However, don't keep any GT box unmatched (rare, but happens). Instead,
+    # match it to the closest anchor (even if its max IoU is < 0.3).
+    #
+    # 1. Set negative anchors first. They get overwritten below if a GT box is
+    # matched to them. Skip boxes in crowd areas.
+    anchor_iou_argmax = np.argmax(overlaps, axis=1)
+    anchor_iou_max = overlaps[np.arange(overlaps.shape[0]), anchor_iou_argmax]
+    rpn_match[(anchor_iou_max < 0.3) & (no_crowd_bool)] = RPN_CLS_NEGATIVE
+    # 2. Set an anchor for each GT box (regardless of IoU value).
+    # TODO: If multiple anchors have the same IoU match all of them
+    gt_iou_argmax = np.argmax(overlaps, axis=0)
+    rpn_match[gt_iou_argmax] = RPN_CLS_POSITIVE
+    # 3. Set anchors with high overlap as positive.
+    rpn_match[anchor_iou_max >= 0.7] = RPN_CLS_POSITIVE
+
+    # For positive anchors, compute shift and scale needed to transform them
+    # to match the corresponding GT boxes.
+    ids = np.where(rpn_match == RPN_CLS_POSITIVE)[0]
+
+    # TODO: use box_refinment() rather than duplicating the code here
+    gt_boxes_per_pos_anchor = gt_boxes[anchor_iou_argmax[ids]]
+    pos_anchors = valid_anchors[ids]
+
+    # Convert coordinates to center plus width/height.
+    # GT Box
+    gt_h = gt_boxes_per_pos_anchor[:, 2] - gt_boxes_per_pos_anchor[:, 0]
+    gt_w = gt_boxes_per_pos_anchor[:, 3] - gt_boxes_per_pos_anchor[:, 1]
+    gt_center_y = gt_boxes_per_pos_anchor[:, 0] + 0.5 * gt_h
+    gt_center_x = gt_boxes_per_pos_anchor[:, 1] + 0.5 * gt_w
+
+    # Anchor
+    a_h = pos_anchors[:, 2] - pos_anchors[:, 0]
+    a_w = pos_anchors[:, 3] - pos_anchors[:, 1]
+    a_center_y = pos_anchors[:, 0] + 0.5 * a_h
+    a_center_x = pos_anchors[:, 1] + 0.5 * a_w
+
+    # Compute the bbox refinement that the RPN should predict.
+    rpn_bbox[ids, 0] = (gt_center_y - a_center_y) / a_h
+    rpn_bbox[ids, 1] = (gt_center_x - a_center_x) / a_w
+    rpn_bbox[ids, 2] = np.log(gt_h / a_h)
+    rpn_bbox[ids, 3] = np.log(gt_w / a_w)
+
+    # Normalize
+    if config.RPN_BBOX_USE_STD_DEV:
+        rpn_bbox[ids] /= config.BBOX_STD_DEV
+
+    # Reverse valid anchor selection
+    rpn_match_all = np.zeros([len(valid_anchors_mask)], dtype=np.int32)
+    rpn_match_all[valid_anchors_mask] = rpn_match
+
+    rpn_bbox_all = np.zeros([len(valid_anchors_mask), 4], dtype=np.float32)
+    rpn_bbox_all[valid_anchors_mask] = rpn_bbox
+
+    return rpn_match_all, rpn_bbox_all, np.count_nonzero(rpn_match == RPN_CLS_POSITIVE)
 
 
 
@@ -643,8 +778,12 @@ class RPNBaseModel (nn.Module):
 
     def ground_truth_to_rpn_targets(self, image_shape, gt_class_ids, gt_boxes):
         anchors, valid_mask = self.config.ANCHOR_CACHE.get_anchors_and_valid_masks_for_image_shape(image_shape)
-        rpn_match, rpn_bbox, num_positives = build_rpn_targets(image_shape, anchors, valid_mask,
-                                                               gt_class_ids, gt_boxes, self.config)
+        if self.config.RPN_TRAIN_ANCHORS_PER_IMAGE is not None:
+            rpn_match, rpn_bbox, num_positives = build_rpn_targets_balanced(image_shape, anchors, valid_mask,
+                                                                            gt_class_ids, gt_boxes, self.config)
+        else:
+            rpn_match, rpn_bbox, num_positives = build_rpn_targets_all(image_shape, anchors, valid_mask,
+                                                                       gt_class_ids, gt_boxes, self.config)
         return rpn_match, rpn_bbox, num_positives
 
 
@@ -863,8 +1002,8 @@ class AbstractRPNNModel (RPNBaseModel):
         rpn_feature_maps, rcnn_feature_maps, rpn_class_logits, _, rpn_bbox = self._feature_maps_and_proposals_all(
             molded_images)
 
-        rpn_class_losses = compute_rpn_class_loss_per_sample(self.config, rpn_target_match, rpn_class_logits)
-        rpn_bbox_losses = compute_rpn_bbox_loss_per_sample(rpn_target_bbox, rpn_target_match, rpn_bbox, rpn_num_pos)
+        rpn_class_losses, rpn_bbox_losses = compute_rpn_losses_per_sample(
+            self.config, rpn_target_match, rpn_class_logits, rpn_target_bbox, rpn_bbox, rpn_num_pos)
 
         return (rpn_class_losses, rpn_bbox_losses)
 

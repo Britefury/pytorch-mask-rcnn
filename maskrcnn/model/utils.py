@@ -375,20 +375,15 @@ def box_refinement(box, gt_box):
 #  Plotting Utility Functions
 ############################################################
 
-def plot_image_with_boxes(img, boxes, figsize=(10, 10), alpha=1.0, colours=None):
-    plt.figure(figsize=figsize)
-    ax = plt.subplot(1, 1, 1)
+def plot_image_with_boxes(ax, img, boxes, alpha=1.0, colours=None):
     ax.imshow(img)
     if colours is None:
         colours = ['red'] * len(boxes)
     for (y1, x1, y2, x2), col in zip(boxes, colours):
         rect = Rectangle((x1, y1), x2-x1, y2-y1, facecolor=None, edgecolor=col, fill=False, alpha=alpha)
         ax.add_patch(rect)
-    plt.show()
 
-def plot_image_with_stratified_boxes(img, boxes, figsize=(10, 10), alpha=1.0, colour='red'):
-    plt.figure(figsize=figsize)
-    ax = plt.subplot(1, 1, 1)
+def plot_image_with_stratified_boxes(ax, img, boxes, alpha=1.0, colour='red'):
     ax.imshow(img)
     for group in boxes:
         group_colour = group.get('colour', colour)
@@ -396,4 +391,3 @@ def plot_image_with_stratified_boxes(img, boxes, figsize=(10, 10), alpha=1.0, co
         for (y1, x1, y2, x2) in group['boxes']:
             rect = Rectangle((x1, y1), x2 - x1, y2 - y1, facecolor=None, edgecolor=group_colour, fill=False, alpha=group_alpha)
             ax.add_patch(rect)
-    plt.show()

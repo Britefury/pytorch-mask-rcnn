@@ -9,8 +9,7 @@ import torch.nn.functional as F
 from maskrcnn.roialign.crop_and_resize.crop_and_resize import CropAndResizeAligned
 from .utils import not_empty, is_empty, box_refinement, SamePad2d, concatenate_detections, flatten_detections,\
     unflatten_detections, split_detections
-from .rpn import RPNHead, compute_rpn_class_loss, compute_rpn_class_loss_per_sample, \
-    compute_rpn_bbox_loss, compute_rpn_bbox_loss_per_sample, alt_forward_method
+from .rpn import RPNHead, compute_rpn_losses, compute_rpn_losses_per_sample, alt_forward_method
 from .rcnn import RCNNHead, FasterRCNNBaseModel, detection_layer, pyramid_roi_align, compute_rcnn_bbox_loss,\
     compute_rcnn_class_loss, bbox_overlaps
 
@@ -527,8 +526,9 @@ def compute_mrcnn_mask_loss(target_masks, target_class_ids, pred_masks):
 def compute_maskrcnn_losses(config, rpn_match, rpn_bbox, rpn_num_pos_per_sample, rpn_class_logits, rpn_pred_bbox,
                             target_class_ids, mrcnn_class_logits, target_deltas, mrcnn_bbox, target_mask, mrcnn_mask):
 
-    rpn_class_loss = compute_rpn_class_loss(config, rpn_match, rpn_class_logits)
-    rpn_bbox_loss = compute_rpn_bbox_loss(rpn_bbox, rpn_match, rpn_pred_bbox, rpn_num_pos_per_sample)
+    rpn_class_loss, rpn_bbox_loss = compute_rpn_losses(
+        config, rpn_match, rpn_class_logits, rpn_bbox, rpn_pred_bbox, rpn_num_pos_per_sample)
+
     mrcnn_class_loss = compute_rcnn_class_loss(target_class_ids, mrcnn_class_logits)
     mrcnn_bbox_loss = compute_rcnn_bbox_loss(target_deltas, target_class_ids, mrcnn_bbox)
     mrcnn_mask_loss = compute_mrcnn_mask_loss(target_mask, target_class_ids, mrcnn_mask)
@@ -660,27 +660,32 @@ class AbstractMaskRCNNModel (FasterRCNNBaseModel):
                     molded_images, gt_class_ids, gt_boxes, gt_masks, n_gts_per_sample,
                     hard_negative_mining=hard_negative_mining)
 
-        rpn_class_losses = compute_rpn_class_loss_per_sample(self.config, rpn_target_match, rpn_class_logits)
-        rpn_bbox_losses = compute_rpn_bbox_loss_per_sample(rpn_target_bbox, rpn_target_match, rpn_pred_bbox,
-                                                           rpn_num_pos)
+        rpn_class_losses, rpn_bbox_losses = compute_rpn_losses_per_sample(
+            self.config, rpn_target_match, rpn_class_logits, rpn_target_bbox, rpn_pred_bbox, rpn_num_pos)
+
         rcnn_class_losses = []
         rcnn_bbox_losses = []
         mrcnn_mask_losses = []
         for sample_i, n_targets in enumerate(n_targets_per_sample):
-            rcnn_class_loss = compute_rcnn_class_loss(
-                target_class_ids[sample_i, :n_targets], rcnn_class_logits[sample_i, :n_targets])
-            rcnn_bbox_loss = compute_rcnn_bbox_loss(
-                target_deltas[sample_i, :n_targets], target_class_ids[sample_i, :n_targets],
-                rcnn_bbox[sample_i, :n_targets])
-            mrcnn_mask_loss = compute_mrcnn_mask_loss(
-                target_mask[sample_i, :n_targets], target_class_ids[sample_i, :n_targets],
-                mrcnn_mask[sample_i, :n_targets])
-            rcnn_class_losses.append(rcnn_class_loss)
-            rcnn_bbox_losses.append(rcnn_bbox_loss)
-            mrcnn_mask_losses.append(mrcnn_mask_loss)
-        rcnn_class_losses = torch.tensor(rcnn_class_losses, dtype=float, device=rcnn_class_logits.device)
-        rcnn_bbox_losses = torch.tensor(rcnn_bbox_losses, dtype=float, device=rcnn_bbox.device)
-        mrcnn_mask_losses = torch.tensor(mrcnn_mask_losses, dtype=float, device=rcnn_bbox.device)
+            if n_targets > 0:
+                rcnn_class_loss = compute_rcnn_class_loss(
+                    target_class_ids[sample_i, :n_targets], rcnn_class_logits[sample_i, :n_targets])
+                rcnn_bbox_loss = compute_rcnn_bbox_loss(
+                    target_deltas[sample_i, :n_targets], target_class_ids[sample_i, :n_targets],
+                    rcnn_bbox[sample_i, :n_targets])
+                mrcnn_mask_loss = compute_mrcnn_mask_loss(
+                    target_mask[sample_i, :n_targets], target_class_ids[sample_i, :n_targets],
+                    mrcnn_mask[sample_i, :n_targets])
+                rcnn_class_losses.append(rcnn_class_loss[None])
+                rcnn_bbox_losses.append(rcnn_bbox_loss[None])
+                mrcnn_mask_losses.append(mrcnn_mask_loss[None])
+            else:
+                rcnn_class_losses.append(torch.tensor([0.0], dtype=torch.float, device=molded_images.device))
+                rcnn_bbox_losses.append(torch.tensor([0.0], dtype=torch.float, device=molded_images.device))
+                mrcnn_mask_losses.append(torch.tensor([0.0], dtype=torch.float, device=molded_images.device))
+        rcnn_class_losses = torch.cat(rcnn_class_losses, dim=0)
+        rcnn_bbox_losses = torch.cat(rcnn_bbox_losses, dim=0)
+        mrcnn_mask_losses = torch.cat(mrcnn_mask_losses, dim=0)
 
         return (rpn_class_losses, rpn_bbox_losses, rcnn_class_losses, rcnn_bbox_losses, mrcnn_mask_losses)
 
