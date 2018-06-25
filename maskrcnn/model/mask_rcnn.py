@@ -8,7 +8,7 @@ import torch.nn.functional as F
 
 from maskrcnn.roialign.crop_and_resize.crop_and_resize import CropAndResizeAligned
 from .utils import not_empty, is_empty, box_refinement, SamePad2d, concatenate_detections, flatten_detections,\
-    unflatten_detections, split_detections
+    unflatten_detections, split_detections, torch_tensor_to_int_list
 from .rpn import RPNHead, compute_rpn_losses, compute_rpn_losses_per_sample, alt_forward_method
 from .rcnn import RCNNHead, FasterRCNNBaseModel, detection_layer, pyramid_roi_align, compute_rcnn_bbox_loss,\
     compute_rcnn_class_loss, bbox_overlaps
@@ -523,15 +523,17 @@ def compute_mrcnn_mask_loss(target_masks, target_class_ids, pred_masks):
     return loss
 
 
-def compute_maskrcnn_losses(config, rpn_match, rpn_bbox, rpn_num_pos_per_sample, rpn_class_logits, rpn_pred_bbox,
-                            target_class_ids, mrcnn_class_logits, target_deltas, mrcnn_bbox, target_mask, mrcnn_mask):
+def compute_maskrcnn_losses(config, rpn_pred_class_logits, rpn_pred_bbox, rpn_target_match, rpn_target_bbox,
+                            rpn_target_num_pos_per_sample, rcnn_pred_class_logits, rcnn_pred_bbox,
+                            rcnn_target_class_ids, rcnn_target_deltas, mrcnn_pred_mask, mrcnn_target_mask):
+    rpn_target_num_pos_per_sample = torch_tensor_to_int_list(rpn_target_num_pos_per_sample)
 
-    rpn_class_loss, rpn_bbox_loss = compute_rpn_losses(
-        config, rpn_match, rpn_class_logits, rpn_bbox, rpn_pred_bbox, rpn_num_pos_per_sample)
+    rpn_class_loss, rpn_bbox_loss = compute_rpn_losses(config, rpn_pred_class_logits, rpn_pred_bbox, rpn_target_match, rpn_target_bbox,
+                                                       rpn_target_num_pos_per_sample)
 
-    mrcnn_class_loss = compute_rcnn_class_loss(target_class_ids, mrcnn_class_logits)
-    mrcnn_bbox_loss = compute_rcnn_bbox_loss(target_deltas, target_class_ids, mrcnn_bbox)
-    mrcnn_mask_loss = compute_mrcnn_mask_loss(target_mask, target_class_ids, mrcnn_mask)
+    mrcnn_class_loss = compute_rcnn_class_loss(rcnn_target_class_ids, rcnn_pred_class_logits)
+    mrcnn_bbox_loss = compute_rcnn_bbox_loss(rcnn_target_deltas, rcnn_target_class_ids, rcnn_pred_bbox)
+    mrcnn_mask_loss = compute_mrcnn_mask_loss(mrcnn_target_mask, rcnn_target_class_ids, mrcnn_pred_mask)
 
     return [rpn_class_loss, rpn_bbox_loss, mrcnn_class_loss, mrcnn_bbox_loss, mrcnn_mask_loss]
 

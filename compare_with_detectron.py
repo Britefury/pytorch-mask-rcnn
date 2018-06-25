@@ -48,6 +48,7 @@ class InferenceConfig(coco.CocoConfig):
     RPN_PRE_NMS_LIMIT_TEST = 1000
     RPN_POST_NMS_ROIS_INFERENCE = 1000
     CENTRE_ANCHORS = True
+    ANCHORS_DETECTRON = True
 
     RPN_BBOX_USE_STD_DEV = False
     RCNN_BBOX_USE_STD_DEV = True

@@ -274,6 +274,19 @@ def unflatten_detections(n_dets_per_sample, *flat_dets):
         return dets
 
 
+def torch_tensor_to_int_list(x):
+    """
+    Convert a list in the form of a torch tensor to a list
+    :param x: Torch tensor of shape [n] where each item is an int
+    :return: list of ints
+    """
+    if isinstance(x, torch.Tensor):
+        return [int(i) for i in x.detach().cpu().numpy().tolist()]
+    elif isinstance(x, np.ndarray):
+        return [int(i) for i in x.tolist()]
+    return x
+
+
 class SamePad2d(nn.Module):
     """Mimics tensorflow's 'SAME' padding.
     """

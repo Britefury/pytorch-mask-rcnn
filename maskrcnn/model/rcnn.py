@@ -9,7 +9,7 @@ from maskrcnn.roialign.crop_and_resize.crop_and_resize import CropAndResizeAlign
 from maskrcnn.roialign.roi_align.roi_align import RoIAlign
 from .utils import not_empty, is_empty, log2, intersect1d, unique1d, box_refinement, split_detections
 from .utils import flatten_detections_with_sample_indices, flatten_detections
-from .utils import unflatten_detections, concatenate_detections, plot_image_with_stratified_boxes
+from .utils import unflatten_detections, concatenate_detections, torch_tensor_to_int_list
 from .rpn import apply_box_deltas, compute_rpn_losses, compute_rpn_losses_per_sample
 from .rpn import RPNBaseModel, alt_forward_method
 
@@ -438,13 +438,15 @@ def compute_rcnn_bbox_loss(target_bbox, target_class_ids, pred_bbox):
 
 
 
-def compute_faster_rcnn_losses(config, rpn_match, rpn_bbox, rpn_num_pos_per_sample, rpn_class_logits, rpn_pred_bbox,
-                               target_class_ids, rcnn_class_logits, target_deltas, rcnn_bbox):
-    rpn_class_loss, rpn_bbox_loss = compute_rpn_losses(
-        config, rpn_match, rpn_class_logits, rpn_bbox, rpn_pred_bbox, rpn_num_pos_per_sample)
+def compute_faster_rcnn_losses(config, rpn_pred_class_logits, rpn_pred_bbox, rpn_target_match, rpn_target_bbox,
+                               rpn_target_num_pos_per_sample, rcnn_pred_class_logits, rcnn_pred_bbox,
+                               rcnn_target_class_ids, rcnn_target_deltas):
+    rpn_target_num_pos_per_sample = torch_tensor_to_int_list(rpn_target_num_pos_per_sample)
+    rpn_class_loss, rpn_bbox_loss = compute_rpn_losses(config, rpn_pred_class_logits, rpn_pred_bbox, rpn_target_match,
+                                                       rpn_target_bbox, rpn_target_num_pos_per_sample)
 
-    rcnn_class_loss = compute_rcnn_class_loss(target_class_ids, rcnn_class_logits)
-    rcnn_bbox_loss = compute_rcnn_bbox_loss(target_deltas, target_class_ids, rcnn_bbox)
+    rcnn_class_loss = compute_rcnn_class_loss(rcnn_target_class_ids, rcnn_pred_class_logits)
+    rcnn_bbox_loss = compute_rcnn_bbox_loss(rcnn_target_deltas, rcnn_target_class_ids, rcnn_pred_bbox)
 
     return [rpn_class_loss, rpn_bbox_loss, rcnn_class_loss, rcnn_bbox_loss]
 
