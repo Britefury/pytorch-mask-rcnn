@@ -407,8 +407,8 @@ def compute_rpn_losses(config, rpn_pred_class_logits, rpn_pred_bbox, rpn_target_
 
     return cls_loss, box_loss
 
-def compute_rpn_losses_per_sample(config, rpn_match, rpn_class_logits, target_bbox, rpn_bbox,
-                                  rpn_num_pos_per_sample):
+def compute_rpn_losses_per_sample(config, rpn_pred_class_logits, rpn_pred_bbox, rpn_target_match, rpn_target_bbox,
+                                  rpn_target_num_pos_per_sample):
     """RPN anchor classifier loss.
 
     rpn_match: [batch, anchors, 1]. Anchor match type. 1=positive,
@@ -420,28 +420,28 @@ def compute_rpn_losses_per_sample(config, rpn_match, rpn_class_logits, target_bb
     rpn_num_pos_per_sample: [batch] number of positives per sample
     """
 
-    if len(rpn_match.size()) == 3:
+    if len(rpn_target_match.size()) == 3:
         # Squeeze last dim to simplify
-        rpn_match = rpn_match.squeeze(2)
+        rpn_target_match = rpn_target_match.squeeze(2)
 
     # Get anchor classes. Convert the -1/+1 match to 0/1 values.
-    anchor_class = (rpn_match == RPN_CLS_POSITIVE).long()
+    anchor_class = (rpn_target_match == RPN_CLS_POSITIVE).long()
 
     # Positive and Negative anchors contribute to the loss,
     # but neutral anchors don't.
-    non_neutral = rpn_match != RPN_CLS_NEUTRAL
+    non_neutral = rpn_target_match != RPN_CLS_NEUTRAL
     cls_losses = []
     box_losses = []
-    for sample_i, n_pos in enumerate(rpn_num_pos_per_sample):
+    for sample_i, n_pos in enumerate(rpn_target_num_pos_per_sample):
         if config.RPN_TRAIN_ANCHORS_PER_IMAGE is None:
             # No sample balancing; use all samples, so don't select
-            sample_class_logits = rpn_class_logits[sample_i]
+            sample_class_logits = rpn_pred_class_logits[sample_i]
             sample_anchor_class = anchor_class[sample_i]
             weight = non_neutral[sample_i].float()[:, None]
 
             if n_pos > 0:
-                sample_rpn_bbox = rpn_bbox[sample_i, :]
-                sample_pos_target_box = target_bbox[sample_i, :, :]
+                sample_rpn_bbox = rpn_pred_bbox[sample_i, :]
+                sample_pos_target_box = rpn_target_bbox[sample_i, :, :]
             else:
                 sample_rpn_bbox = sample_pos_target_box = None
         else:
@@ -449,13 +449,13 @@ def compute_rpn_losses_per_sample(config, rpn_match, rpn_class_logits, target_bb
             pos_indices = torch.nonzero(anchor_class[sample_i])
 
             # Pick rows that contribute to the loss and filter out the rest.
-            sample_class_logits = rpn_class_logits[sample_i, indices[:, 0], ...]
+            sample_class_logits = rpn_pred_class_logits[sample_i, indices[:, 0], ...]
             sample_anchor_class = anchor_class[sample_i, indices[:, 0]]
             weight = 1.0
 
             if n_pos > 0:
-                sample_rpn_bbox = rpn_bbox[sample_i, pos_indices[:, 0]]
-                sample_pos_target_box = target_bbox[sample_i, :n_pos, :]
+                sample_rpn_bbox = rpn_pred_bbox[sample_i, pos_indices[:, 0]]
+                sample_pos_target_box = rpn_target_bbox[sample_i, :n_pos, :]
             else:
                 sample_rpn_bbox = sample_pos_target_box = None
 
@@ -466,14 +466,14 @@ def compute_rpn_losses_per_sample(config, rpn_match, rpn_class_logits, target_bb
             if n_pos > 0:
                 box_loss = (F.smooth_l1_loss(sample_rpn_bbox, sample_pos_target_box, reduce=False) * weight).mean()
             else:
-                box_loss = torch.tensor(0.0, dtype=torch.float, device=rpn_bbox.device)
+                box_loss = torch.tensor(0.0, dtype=torch.float, device=rpn_pred_bbox.device)
         elif config.RPN_OBJECTNESS_FUNCTION == 'softmax':
             # Cross-entropy loss
             cls_loss = F.cross_entropy(sample_class_logits, sample_anchor_class, weight=weight)
             if n_pos > 0:
                 box_loss = (F.smooth_l1_loss(sample_rpn_bbox, sample_pos_target_box, reduce=False) * weight).mean()
             else:
-                box_loss = torch.tensor(0.0, dtype=torch.float, device=rpn_bbox.device)
+                box_loss = torch.tensor(0.0, dtype=torch.float, device=rpn_pred_bbox.device)
         elif config.RPN_OBJECTNESS_FUNCTION == 'focal':
             # Cross-entropy loss
             num_pos = sample_anchor_class.sum().float()
@@ -483,7 +483,7 @@ def compute_rpn_losses_per_sample(config, rpn_match, rpn_class_logits, target_bb
             if n_pos > 0:
                 box_loss = (F.smooth_l1_loss(sample_rpn_bbox, sample_pos_target_box, reduce=False) * weight).sum() / num_pos
             else:
-                box_loss = torch.tensor(0.0, dtype=torch.float, device=rpn_bbox.device)
+                box_loss = torch.tensor(0.0, dtype=torch.float, device=rpn_pred_bbox.device)
         else:
             raise ValueError('Invalid value {} for config.RPN_OBJECTNESS_FUNCTION'.format(
                 config.RPN_OBJECTNESS_FUNCTION))
@@ -1003,8 +1003,9 @@ class AbstractRPNNModel (RPNBaseModel):
         rpn_feature_maps, rcnn_feature_maps, rpn_class_logits, _, rpn_bbox = self._feature_maps_and_proposals_all(
             molded_images)
 
-        rpn_class_losses, rpn_bbox_losses = compute_rpn_losses_per_sample(
-            self.config, rpn_target_match, rpn_class_logits, rpn_target_bbox, rpn_bbox, rpn_num_pos)
+        rpn_class_losses, rpn_bbox_losses = compute_rpn_losses_per_sample(self.config, rpn_class_logits, rpn_bbox,
+                                                                          rpn_target_match, rpn_target_bbox,
+                                                                          rpn_num_pos)
 
         return (rpn_class_losses, rpn_bbox_losses)
 

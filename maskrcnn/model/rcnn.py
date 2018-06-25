@@ -977,7 +977,7 @@ class AbstractFasterRCNNModel (FasterRCNNBaseModel):
                                    hard_negative_mining=hard_negative_mining)
 
         rpn_class_losses, rpn_bbox_losses = compute_rpn_losses_per_sample(
-            self.config, rpn_target_match, rpn_class_logits, rpn_target_bbox, rpn_pred_bbox, rpn_num_pos)
+            self.config, rpn_class_logits, rpn_pred_bbox, rpn_target_match, rpn_target_bbox, rpn_num_pos)
 
         rcnn_class_losses = []
         rcnn_bbox_losses = []
