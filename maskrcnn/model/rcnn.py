@@ -19,7 +19,7 @@ class RCNNHead (nn.Module):
     """R-CNN head model.
 
     config: configuration object
-    depth: number of channels in hidden layers
+    depth: number of channels per feature map pixel incoming from FPN
     pool_size: size of output extracted by ROI-align
     num_classes: number of object classes
     roi_canonical_scale: the natural size of objects detected at the canonical FPN pyramid level
@@ -33,7 +33,7 @@ class RCNNHead (nn.Module):
         'roi_align': ROIAlign from Detectron.pytorch
     roi_align_sampling_ratio: sampling ratio for 'roi_align' function
 
-    Returns:
+    Invoking this model returns (rcnn_class_logits, rcnn_class_probs, rcnn_bbox):
         rcnn_class_logits: [batch, detection, cls] Predicted class logits
         rcnn_class_probs: [batch, detection, cls] Predicted class probabilities
         rcnn_bbox: [batch, detection, cls, (dy, dx, log(dh), log(dw))] Predicted bbox deltas
@@ -479,9 +479,6 @@ def compute_rcnn_bbox_loss(target_bbox_deltas, target_class_ids, pred_bbox_delta
         loss = torch.tensor([0], dtype=torch.float, device=device)
 
     return loss
-
-
-
 
 
 def compute_faster_rcnn_losses(config, rpn_pred_class_logits, rpn_pred_bbox, rpn_target_match, rpn_target_bbox,
@@ -1001,7 +998,7 @@ class AbstractFasterRCNNModel (FasterRCNNBaseModel):
 
         :param images: Tensor of images
         :param gt_class_ids: ground truth box classes [batch, detection]
-        :param gt_boxes: ground truth boxes [batch, detection, [y1, x1, y2, x2]
+        :param gt_boxes: ground truth boxes [batch, detection, (y1, x1, y2, x2)]
         :param n_gts_per_sample: number of ground truth detections per sample [batch]
         :param hard_negative_mining: if True, use hard negative mining to choose samples for training R-CNN head
 

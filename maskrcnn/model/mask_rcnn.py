@@ -20,6 +20,26 @@ from .rcnn import RCNNHead, FasterRCNNBaseModel, refine_detections_batch, pyrami
 ############################################################
 
 class MaskHead (nn.Module):
+    """Mask head model.
+
+    config: configuration object
+    depth: number of channels per feature map pixel incoming from FPN
+    pool_size: size of output extracted by ROI-align for mask generation
+    num_classes: number of object classes
+    roi_canonical_scale: the natural size of objects detected at the canonical FPN pyramid level
+    roi_canonical_level: the index identifying the canonical FPN pyramid level
+    min_pyramid_level: the index of the lowest FPN pyramid level
+    max_pyramid_level: the index of the highest FPN pyramid level
+    roi_align_function: string identifying the ROI-align function used:
+        'crop_and_resize': crops the selected region and resizes to `pool_size` using bilinear interpolation
+        'border_aware_crop_and_resize': as 'crop_and_resize' except that the feature map pixels are assumed to have
+            their centres at '(y+0.5, x+0.5)', so the image extnds from (0,0) to (height, width)
+        'roi_align': ROIAlign from Detectron.pytorch
+    roi_align_sampling_ratio: sampling ratio for 'roi_align' function
+
+    Invoking this model returns mask predictions mask_pred:
+        mask_pred: [batch, detection, mask_height, mask_width, cls] class specific mask predicted probabilities
+    """
     def __init__(self, config, depth, pool_size, num_classes, roi_canonical_scale, roi_canonical_level,
                  min_pyramid_level, max_pyramid_level, roi_align_function, roi_align_sampling_ratio):
         super(MaskHead, self).__init__()
@@ -124,48 +144,133 @@ class MaskHead (nn.Module):
         return det_map, orphans
 
 
+
 ############################################################
-#  Detection Target Layer
+#  Loss Functions
 ############################################################
 
-def maskrcnn_detection_target_one_sample(proposals, prop_class_logits, prop_class, prop_bbox_deltas,
-                                         gt_class_ids, gt_boxes, gt_masks, config,
-                                         hard_negative_mining=False):
-    """Subsamples proposals and generates target box refinment, class_ids,
-    and masks for each.
+def compute_mrcnn_mask_loss(target_masks, target_class_ids, pred_masks):
+    """Mask binary cross-entropy loss for the masks head.
+
+    :param target_masks: [num_rois, mask_height, mask_width]. Mask targets as a float32 tensor of values 0 or 1.
+    :param target_class_ids: [num_rois]. Target class IDs.
+    :param pred_masks: [num_rois, height, width, num_classes] Class specific mask predictions.
+    :return: loss as a torch scalar
+    """
+    device = pred_masks.device
+
+    if not_empty(target_class_ids):
+        # Only positive ROIs contribute to the loss. And only
+        # the class specific mask of each ROI.
+        positive_ix = torch.nonzero(target_class_ids > 0)[:, 0]
+        positive_class_ids = target_class_ids[positive_ix.data].long()
+        indices = torch.stack((positive_ix, positive_class_ids), dim=1)
+
+        # Gather the masks (predicted and true) that contribute to loss
+        y_true = target_masks[indices[:,0].data, :, :]
+        y_pred = pred_masks[indices[:,0].data, indices[:,1].data, :,: ]
+
+        # Binary cross entropy
+        loss = F.binary_cross_entropy(y_pred, y_true)
+    else:
+        loss = torch.tensor([0], dtype=torch.float, device=device)
+
+    return loss
+
+
+def compute_maskrcnn_losses(config, rpn_pred_class_logits, rpn_pred_bbox, rpn_target_match, rpn_target_bbox,
+                            rpn_target_num_pos_per_sample, rcnn_pred_class_logits, rcnn_pred_bbox_deltas,
+                            rcnn_target_class_ids, rcnn_target_deltas, mrcnn_pred_mask, mrcnn_target_mask):
+    """Loss for Mask RCNN network
+
+    Combines the RPN, R-CNN and Mask losses.
+
+    The RPN predictions and targets retain their batch/anchor shape.
+    The RCNN and mask predictions and targets should be flattened from [batch, detection] into [batch & detection].
+    This is done by the `train_forward` method, so these two fit together.
+
+    :param config: configuration object
+    :param rpn_pred_class_logits: [batch, anchors, 2] RPN classifier logits for FG/BG if using softmax or focal loss for
+        RPN class (see config.RPN_OBJECTNESS_FUNCTION),
+        [batch, anchors] RPN classifier FG logits if using sigmoid.
+    :param rpn_pred_bbox: [batch, anchors, (dy, dx, log(dh), log(dw))]
+    :param rpn_target_match: [batch, anchors]. Anchor match type. 1=positive,
+               -1=negative, 0=neutral anchor.
+    :param rpn_target_bbox: [batch, max positive anchors, (dy, dx, log(dh), log(dw))].
+        Uses 0 padding to fill in unsed bbox deltas.
+    :param rpn_target_num_pos_per_sample: [batch] number of positives per sample
+
+    :param rcnn_pred_class_logits: [num_rois, num_classes] Predicted class logits
+    :param rcnn_pred_bbox_deltas: [num_rois, num_classes, (dy, dx, log(dh), log(dw))] predicted bbox deltas
+    :param rcnn_target_class_ids: [num_rois]. Target class IDs. Uses zero padding to fill in the array.
+    :param rcnn_target_deltas: [num_rois, (dy, dx, log(dh), log(dw))] target box deltas
+
+    :param mrcnn_pred_mask: [num_rois, height, width, num_classes] Class specific mask predictions
+    :param mrcnn_target_mask: [num_rois, mask_height, mask_width] Mask targets as a float32 tensor of values 0 or 1.
+
+    :return: (rpn_class_loss, rpn_bbox_loss, rcnn_class_loss, rcnn_bbox_loss, mrcnn_mask_loss)
+        rpn_class_loss: RPN objectness loss as a torch scalar
+        rpn_bbox_loss: RPN box loss as a torch scalar
+        rcnn_class_loss: RCNN classification loss as a torch scalar
+        rcnn_bbox_loss: RCNN bbox loss as a torch scalar
+        mrcnn_mask_loss: Mask-RCNN mask loss as a torch scalar
+    """
+
+    rpn_target_num_pos_per_sample = torch_tensor_to_int_list(rpn_target_num_pos_per_sample)
+
+    rpn_class_loss, rpn_bbox_loss = compute_rpn_losses(config, rpn_pred_class_logits, rpn_pred_bbox, rpn_target_match, rpn_target_bbox,
+                                                       rpn_target_num_pos_per_sample)
+
+    rcnn_class_loss = compute_rcnn_class_loss(rcnn_target_class_ids, rcnn_pred_class_logits)
+    rcnn_bbox_loss = compute_rcnn_bbox_loss(rcnn_target_deltas, rcnn_target_class_ids, rcnn_pred_bbox_deltas)
+
+    mrcnn_mask_loss = compute_mrcnn_mask_loss(mrcnn_target_mask, rcnn_target_class_ids, mrcnn_pred_mask)
+
+    return [rpn_class_loss, rpn_bbox_loss, rcnn_class_loss, rcnn_bbox_loss, mrcnn_mask_loss]
+
+
+
+############################################################
+#  Detection target generation
+############################################################
+
+def maskrcnn_detection_target_one_sample(config, proposals_nrm, prop_class_logits, prop_class, prop_bbox_deltas, gt_class_ids,
+                                         gt_boxes_nrm, gt_masks, hard_negative_mining=False):
+    """Subsamples proposals and matches them with ground truth boxes, generating target box refinement,
+    class_ids and masks.
 
     Works on a single sample.
 
     If hard_negative_mining is True, values must be provided for prop_class_logits, prop_class and prop_bbox_deltas,
     otherwise they are optional.
 
-    Inputs:
-    proposals: [N, (y1, x1, y2, x2)] in normalized coordinates.
-    prop_class_logits: [N, N_CLASSES] predicted class logits for each proposal.
-    prop_class: [N, N_CLASSES] predicted class probabilities for each proposal.
-    prop_bbox_deltas: [N, N_CLASSES, 4] predicted bbox deltas for each proposal.
-    gt_class_ids: [N_GT] Integer class IDs.
-    gt_boxes: [N_GT, (y1, x1, y2, x2)] in normalized
-              coordinates.
-    gt_masks: [height, width, N_GT] of boolean type
-    hard_negative_mining: bool; if True, use hard negative mining to choose target boxes
+    :param config: configuration object
+    :param proposals_nrm: [N, (y1, x1, y2, x2)] in normalized coordinates.
+    :param prop_class_logits: (optional) [N, N_CLASSES] predicted RCNN class logits for each proposal (used
+        when hard negative mining is enabled).
+    :param prop_class: (optional) [N, N_CLASSES] predicted RCNN class probabilities for each proposal (used
+        when hard negative mining is enabled).
+    :param prop_bbox_deltas: (optional) [N, N_CLASSES, 4] predicted RCNN bbox deltas for each proposal (used
+        when hard negative mining is enabled).
+    :param gt_class_ids: [N_GT] Ground truth class IDs.
+    :param gt_boxes_nrm: [N_GT, (y1, x1, y2, x2)] Ground truth boxes in normalized coordinates.
+    :param gt_masks: [height, width, N_GT] of float type
+    :param hard_negative_mining: bool; if True, use hard negative mining to choose target boxes
 
-    Returns: Target ROIs and corresponding class IDs, bounding box shifts,
-    and masks.
-    rois: [RCNN_TRAIN_ROIS_PER_IMAGE, (y1, x1, y2, x2)] in normalized
-          coordinates
-    roi_class_logits: [RCNN_TRAIN_ROIS_PER_IMAGE, N_CLASSES] predicted class logits of selected proposals
-    roi_class_probs: [RCNN_TRAIN_ROIS_PER_IMAGE, N_CLASSES] predicted class probabilities of selected proposals
-    roi_bbox_deltas: [RCNN_TRAIN_ROIS_PER_IMAGE, N_CLASSES, 4] predicted bbox deltas of selected proposals.
-    target_class_ids: [RCNN_TRAIN_ROIS_PER_IMAGE]. Integer class IDs.
-    target_deltas: [RCNN_TRAIN_ROIS_PER_IMAGE, NUM_CLASSES,
-                    (dy, dx, log(dh), log(dw), class_id)]
-                   Class-specific bbox refinments.
-    target_mask: [RCNN_TRAIN_ROIS_PER_IMAGE, height, width)
-                 Masks cropped to bbox boundaries and resized to neural
-                 network output size.
+    :return: (rois_nrm, roi_class_logits, roi_class_probs, roi_bbox_deltas, target_class_ids, target_deltas, target_masks)
+            Target ROIs and corresponding class IDs, bounding box shifts, where:
+        rois_nrm: [RCNN_TRAIN_ROIS_PER_IMAGE, (y1, x1, y2, x2)] proposals selected for training, in normalized coordinates
+        roi_class_logits: [RCNN_TRAIN_ROIS_PER_IMAGE, N_CLASSES] predicted class logits of selected proposals
+        roi_class_probs: [RCNN_TRAIN_ROIS_PER_IMAGE, N_CLASSES] predicted class probabilities of selected proposals
+        roi_bbox_deltas: [RCNN_TRAIN_ROIS_PER_IMAGE, N_CLASSES, 4] predicted bbox deltas of selected proposals.
+        target_class_ids: [RCNN_TRAIN_ROIS_PER_IMAGE]. Integer class IDs.
+        target_deltas: [RCNN_TRAIN_ROIS_PER_IMAGE, NUM_CLASSES,
+                        (dy, dx, log(dh), log(dw), class_id)]
+                       Class-specific bbox refinments.
+        target_masks: [RCNN_TRAIN_ROIS_PER_IMAGE, height, width)
+                 Masks cropped to bbox boundaries and resized to neural network output size.
     """
-    device = proposals.device
+    device = proposals_nrm.device
 
     if hard_negative_mining:
         if prop_class_logits is None:
@@ -189,21 +294,21 @@ def maskrcnn_detection_target_one_sample(proposals, prop_class_logits, prop_clas
     if not_empty(torch.nonzero(gt_class_ids < 0)):
         crowd_ix = torch.nonzero(gt_class_ids < 0)[:, 0]
         non_crowd_ix = torch.nonzero(gt_class_ids > 0)[:, 0]
-        crowd_boxes = gt_boxes[crowd_ix.data, :]
+        crowd_boxes = gt_boxes_nrm[crowd_ix.data, :]
         crowd_masks = gt_masks[crowd_ix.data, :, :]
         gt_class_ids = gt_class_ids[non_crowd_ix.data]
-        gt_boxes = gt_boxes[non_crowd_ix.data, :]
+        gt_boxes_nrm = gt_boxes_nrm[non_crowd_ix.data, :]
         gt_masks = gt_masks[non_crowd_ix.data, :]
 
         # Compute overlaps with crowd boxes [anchors, crowds]
-        crowd_overlaps = bbox_overlaps(proposals, crowd_boxes)
+        crowd_overlaps = bbox_overlaps(proposals_nrm, crowd_boxes)
         crowd_iou_max = torch.max(crowd_overlaps, dim=1)[0]
         no_crowd_bool = crowd_iou_max < 0.001
     else:
-        no_crowd_bool = torch.tensor([True] * proposals.size()[0], dtype=torch.uint8, device=device)
+        no_crowd_bool = torch.tensor([True] * proposals_nrm.size()[0], dtype=torch.uint8, device=device)
 
     # Compute overlaps matrix [proposals, gt_boxes]
-    overlaps = bbox_overlaps(proposals, gt_boxes)
+    overlaps = bbox_overlaps(proposals_nrm, gt_boxes_nrm)
 
     # Determine postive and negative ROIs
     roi_iou_max = torch.max(overlaps, dim=1)[0]
@@ -238,7 +343,7 @@ def maskrcnn_detection_target_one_sample(proposals, prop_class_logits, prop_clas
             positive_indices = positive_indices[rand_idx]
 
         positive_count = positive_indices.size()[0]
-        positive_rois = proposals[positive_indices.data,:]
+        positive_rois = proposals_nrm[positive_indices.data, :]
         if has_rcnn_predictions:
             positive_class_logits = prop_class_logits[positive_indices.data,:]
             positive_class_probs = prop_class[positive_indices.data,:]
@@ -249,7 +354,7 @@ def maskrcnn_detection_target_one_sample(proposals, prop_class_logits, prop_clas
         # Assign positive ROIs to GT boxes.
         positive_overlaps = overlaps[positive_indices.data,:]
         roi_gt_box_assignment = torch.max(positive_overlaps, dim=1)[1]
-        roi_gt_boxes = gt_boxes[roi_gt_box_assignment.data,:]
+        roi_gt_boxes = gt_boxes_nrm[roi_gt_box_assignment.data, :]
         roi_gt_class_ids = gt_class_ids[roi_gt_box_assignment.data]
 
         # Compute bbox refinement for positive ROIs
@@ -308,7 +413,7 @@ def maskrcnn_detection_target_one_sample(proposals, prop_class_logits, prop_clas
             negative_indices = negative_indices[rand_idx]
 
         negative_count = negative_indices.size()[0]
-        negative_rois = proposals[negative_indices.data, :]
+        negative_rois = proposals_nrm[negative_indices.data, :]
         if has_rcnn_predictions:
             negative_class_logits = prop_class_logits[negative_indices.data,:]
             negative_class_probs = prop_class[negative_indices.data,:]
@@ -366,44 +471,49 @@ def maskrcnn_detection_target_one_sample(proposals, prop_class_logits, prop_clas
     return rois, roi_class_logits, roi_class_probs, roi_bbox_deltas, roi_gt_class_ids, deltas, masks
 
 
-def maskrcnn_detection_target_layer(proposals, prop_class_logits, prop_class, prop_bbox_deltas, n_proposals_per_sample,
-                                    gt_class_ids, gt_boxes, gt_masks, n_gts_per_sample, config,
-                                    hard_negative_mining):
-    """Subsamples proposals and generates target box refinment, class_ids,
-    and masks for each.
+def maskrcnn_detection_target_batch(config, proposals_nrm, prop_class_logits, prop_class, prop_bbox_deltas, n_proposals_per_sample,
+                                    gt_class_ids, gt_boxes_nrm, gt_masks, n_gts_per_sample, hard_negative_mining):
+    """Subsamples proposals and generates target box refinement, class_ids and masks for each.
+
+    Works on a mini-batch of samples.
 
     If hard_negative_mining is True, values must be provided for prop_class_logits, prop_class and prop_bbox_deltas,
     otherwise they are optional.
 
-    Inputs:
-    proposals: [batch, N, (y1, x1, y2, x2)] in normalized coordinates. Might
-               be zero padded if there are not enough proposals.
-    prop_class_logits: [batch, N, N_CLASSES] predicted class logits for each proposal. Might
-               be zero padded if there are not enough proposals.
-    prop_class: [batch, N, N_CLASSES] predicted class probabilities for each proposal. Might
-               be zero padded if there are not enough proposals.
-    prop_bbox_deltas: [batch, N, N_CLASSES, 4] predicted bbox deltas for each proposal. Might
-               be zero padded if there are not enough proposals.
-    gt_class_ids: [batch, N_GT] Integer class IDs.
-    gt_boxes: [batch, N_GT, (y1, x1, y2, x2)] in normalized
-              coordinates.
-    gt_masks: [batch, height, width, N_GT] of boolean type
-    hard_negative_mining: bool; if True, use hard negative mining to choose target boxes
+    :param config: configuration object
+    :param proposals_nrm: [batch, N, (y1, x1, y2, x2)] in normalized coordinates. Dim 1 will
+            be zero padded if there are not enough proposals.
+    :param prop_class_logits: [batch, N, N_CLASSES] predicted class logits for each proposal. Dim 1 will
+            be zero padded if there are not enough proposals. Used when hard negative mining is enabled.
+    :param prop_class: [batch, N, N_CLASSES] predicted class probabilities for each proposal. Dim 1 will
+            be zero padded if there are not enough proposals. Used when hard negative mining is enabled.
+    :param prop_bbox_deltas: [batch, N, N_CLASSES, 4] predicted bbox deltas for each proposal. Dim 1 will
+            be zero padded if there are not enough proposals. Used when hard negative mining is enabled.
+    :param n_proposals_per_sample: number of proposals per sample; specifies the number of proposals in each
+            sample and therefore the amount of zero padding
+    :param gt_class_ids: [batch, N_GT] Ground truth class IDs. Dim 1 will be zero padded if there are not
+            enough GTs
+    :param gt_boxes_nrm: [batch, N_GT, (y1, x1, y2, x2)] in normalized coordinates. Dim 1 will be zero padded
+            if there are not enough GTs
+    :param gt_masks: [batch, height, width, N_GT] of float type
+    :param n_gts_per_sample: number of ground truths per sample; specifies the number of ground truths in each
+            sample and therefore the amount of zero padding
+    :param hard_negative_mining: bool; if True, use hard negative mining to choose target boxes
 
-    Returns: Target ROIs and corresponding class IDs, bounding box shifts,
-    and masks.
-    rois: [batch, RCNN_TRAIN_ROIS_PER_IMAGE, (y1, x1, y2, x2)] in normalized
-          coordinates
-    roi_class_logits: [batch, RCNN_TRAIN_ROIS_PER_IMAGE, N_CLASSES] predicted class logits of selected proposals
-    roi_class_probs: [batch, RCNN_TRAIN_ROIS_PER_IMAGE, N_CLASSES] predicted class probabilities of selected proposals
-    roi_bbox_deltas: [batch, RCNN_TRAIN_ROIS_PER_IMAGE, N_CLASSES, 4] predicted bbox deltas of selected proposals.
-    target_class_ids: [batch, RCNN_TRAIN_ROIS_PER_IMAGE]. Integer class IDs.
-    target_deltas: [batch, RCNN_TRAIN_ROIS_PER_IMAGE, NUM_CLASSES,
-                    (dy, dx, log(dh), log(dw), class_id)]
-                   Class-specific bbox refinments.
-    target_mask: [batch, RCNN_TRAIN_ROIS_PER_IMAGE, height, width)
-                 Masks cropped to bbox boundaries and resized to neural
-                 network output size.
+    :return: (rois_nrm, roi_class_logits, roi_class_probs, roi_bbox_deltas, target_class_ids, target_deltas,
+              target_masks, n_targets_per_sample)
+            Target ROIs and corresponding class IDs, bounding box shifts, where:
+        rois_nrm: [batch, RCNN_TRAIN_ROIS_PER_IMAGE, (y1, x1, y2, x2)] proposals selected for training, in normalized coordinates
+        roi_class_logits: [batch, RCNN_TRAIN_ROIS_PER_IMAGE, N_CLASSES] predicted class logits of selected proposals
+        roi_class_probs: [batch, RCNN_TRAIN_ROIS_PER_IMAGE, N_CLASSES] predicted class probabilities of selected proposals
+        roi_bbox_deltas: [batch, RCNN_TRAIN_ROIS_PER_IMAGE, N_CLASSES, 4] predicted bbox deltas of selected proposals.
+        target_class_ids: [batch, RCNN_TRAIN_ROIS_PER_IMAGE]. Integer class IDs.
+        target_deltas: [batch, RCNN_TRAIN_ROIS_PER_IMAGE, NUM_CLASSES,
+                        (dy, dx, log(dh), log(dw), class_id)]
+                       Class-specific bbox refinments.
+        target_masks: [batch, RCNN_TRAIN_ROIS_PER_IMAGE, height, width)
+                 Masks cropped to bbox boundaries and resized to neural network output size.
+        n_targets_per_sample: number of targets per sample
     """
     if hard_negative_mining:
         if prop_class_logits is None:
@@ -441,12 +551,15 @@ def maskrcnn_detection_target_layer(proposals, prop_class_logits, prop_class, pr
             else:
                 sample_prop_class_logits = sample_prop_class = sample_prop_bbox_deltas = None
             sample_rois, sample_roi_class_logits, sample_roi_class_probs, sample_roi_bbox_deltas, \
-                    sample_roi_gt_class_ids, sample_deltas, sample_masks = maskrcnn_detection_target_one_sample(
-                proposals[sample_i, :n_props], sample_prop_class_logits,
-                sample_prop_class, sample_prop_bbox_deltas,
-                gt_class_ids[sample_i, :n_gts], gt_boxes[sample_i, :n_gts],
-                gt_masks[sample_i, :n_gts], config
-            )
+                    sample_roi_gt_class_ids, sample_deltas, sample_masks = maskrcnn_detection_target_one_sample(config, proposals_nrm[sample_i,
+                                                                                                                        :n_props],
+                                                                                                                sample_prop_class_logits,
+                                                                                                                sample_prop_class,
+                                                                                                                sample_prop_bbox_deltas,
+                                                                                                                gt_class_ids[sample_i,
+                                                                                                                :n_gts],
+                                                                                                                gt_boxes_nrm[sample_i, :n_gts],
+                                                                                                                gt_masks[sample_i, :n_gts])
             if not_empty(sample_rois):
                 sample_rois = sample_rois.unsqueeze(0)
                 if has_rcnn_predictions:
@@ -457,13 +570,13 @@ def maskrcnn_detection_target_layer(proposals, prop_class_logits, prop_class, pr
                 sample_deltas = sample_deltas.unsqueeze(0)
                 sample_masks = sample_masks.unsqueeze(0)
         else:
-            sample_rois = proposals.data.new()
+            sample_rois = proposals_nrm.data.new()
             if has_rcnn_predictions:
-                sample_roi_class_logits = proposals.data.new()
-                sample_roi_class_probs = proposals.data.new()
-                sample_roi_bbox_deltas = proposals.data.new()
+                sample_roi_class_logits = proposals_nrm.data.new()
+                sample_roi_class_probs = proposals_nrm.data.new()
+                sample_roi_bbox_deltas = proposals_nrm.data.new()
             sample_roi_gt_class_ids = gt_class_ids.data.new()
-            sample_deltas = proposals.data.new()
+            sample_deltas = proposals_nrm.data.new()
             sample_masks = gt_masks.data.new()
         rois.append(sample_rois)
         if has_rcnn_predictions:
@@ -485,59 +598,6 @@ def maskrcnn_detection_target_layer(proposals, prop_class_logits, prop_class, pr
     return rois, roi_class_logits, roi_class_probs, roi_bbox_deltas, roi_gt_class_ids, deltas, masks, n_dets_per_sample
 
 
-
-
-############################################################
-#  Loss Functions
-############################################################
-
-def compute_mrcnn_mask_loss(target_masks, target_class_ids, pred_masks):
-    """Mask binary cross-entropy loss for the masks head.
-
-    target_masks: [batch, num_rois, height, width].
-        A float32 tensor of values 0 or 1. Uses zero padding to fill array.
-    target_class_ids: [batch, num_rois]. Integer class IDs. Zero padded.
-    pred_masks: [batch, proposals, height, width, num_classes] float32 tensor
-                with values from 0 to 1.
-    """
-    device = pred_masks.device
-
-    if not_empty(target_class_ids):
-        # Only positive ROIs contribute to the loss. And only
-        # the class specific mask of each ROI.
-        positive_ix = torch.nonzero(target_class_ids > 0)[:, 0]
-        positive_class_ids = target_class_ids[positive_ix.data].long()
-        indices = torch.stack((positive_ix, positive_class_ids), dim=1)
-
-        # Gather the masks (predicted and true) that contribute to loss
-        y_true = target_masks[indices[:,0].data,:,:]
-        y_pred = pred_masks[indices[:,0].data,indices[:,1].data,:,:]
-
-        # Binary cross entropy
-        loss = F.binary_cross_entropy(y_pred, y_true)
-    else:
-        loss = torch.tensor([0], dtype=torch.float, device=device)
-        if target_class_ids.is_cuda:
-            loss = loss.cuda()
-
-    return loss
-
-
-def compute_maskrcnn_losses(config, rpn_pred_class_logits, rpn_pred_bbox, rpn_target_match, rpn_target_bbox,
-                            rpn_target_num_pos_per_sample, rcnn_pred_class_logits, rcnn_pred_bbox,
-                            rcnn_target_class_ids, rcnn_target_deltas, mrcnn_pred_mask, mrcnn_target_mask):
-    rpn_target_num_pos_per_sample = torch_tensor_to_int_list(rpn_target_num_pos_per_sample)
-
-    rpn_class_loss, rpn_bbox_loss = compute_rpn_losses(config, rpn_pred_class_logits, rpn_pred_bbox, rpn_target_match, rpn_target_bbox,
-                                                       rpn_target_num_pos_per_sample)
-
-    mrcnn_class_loss = compute_rcnn_class_loss(rcnn_target_class_ids, rcnn_pred_class_logits)
-    mrcnn_bbox_loss = compute_rcnn_bbox_loss(rcnn_target_deltas, rcnn_target_class_ids, rcnn_pred_bbox)
-    mrcnn_mask_loss = compute_mrcnn_mask_loss(mrcnn_target_mask, rcnn_target_class_ids, mrcnn_pred_mask)
-
-    return [rpn_class_loss, rpn_bbox_loss, mrcnn_class_loss, mrcnn_bbox_loss, mrcnn_mask_loss]
-
-
 ############################################################
 #  Mask R-CNN Model
 ############################################################
@@ -551,7 +611,7 @@ class AbstractMaskRCNNModel (FasterRCNNBaseModel):
     - inherits from FasterRCNNBaseModel:
         - feature pyramid network for feature extraction
         - RPN head for proposal generation
-        - RCNN head
+        - RCNN head for box generation
     """
 
     def __init__(self, config):
@@ -567,32 +627,33 @@ class AbstractMaskRCNNModel (FasterRCNNBaseModel):
                              config.ROI_ALIGN_FUNCTION, config.ROI_ALIGN_SAMPLING_RATIO)
 
 
-    def _train_forward(self, molded_images, gt_class_ids, gt_boxes, gt_masks, n_gts_per_sample, hard_negative_mining=False):
+    def _train_forward(self, images, gt_class_ids, gt_boxes, gt_masks, n_gts_per_sample, hard_negative_mining=False):
         """Supervised forward training pass helper
 
-        molded_images: Tensor of images
-        gt_class_ids: ground truth detection classes [batch, detection]
-        gt_boxes: ground truth detection boxes [batch, detection, [y1, x1, y2, x2]
-        n_gts_per_sample: number of ground truth detections per sample [batch]
-        hard_negative_mining: if True, use hard negative mining to choose samples for training R-CNN head
+        :param images: Tensor of images
+        :param gt_class_ids: ground truth box classes [batch, detection]
+        :param gt_boxes: ground truth boxes [batch, detection, (y1, x1, y2, x2)]
+        :param gt_masks: ground truth masks [batch, detection, mask_height, mask_width]
+        :param n_gts_per_sample: number of ground truth detections per sample [batch]
+        :param hard_negative_mining: if True, use hard negative mining to choose samples for training R-CNN head
 
-        Returns:
-            (rpn_class_logits, rpn_bbox, target_class_ids, rcnn_class_logits,
-                    target_deltas, rcnn_bbox, target_mask, mrcnn_mask, n_targets_per_sample) where
-                rpn_class_logits: [batch, anchor]; predicted class logits from RPN
-                rpn_bbox: [batch, anchor, 4]; predicted bounding box deltas
-                target_class_ids: [batch, ROI]; RCNN target class IDs
-                rcnn_class_logits: [batch, ROI, cls]; RCNN predicted class logits
-                target_deltas: [batch, ROI, 4]; RCNN target box deltas
-                rcnn_bbox: [batch, ROI, cls, 4]; RCNN predicted box deltas
-                target_mask: [batch, ROI, mask_height, mask_width]; target masks
-                mrcnn_mask: [batch, ROI, mask_height, mask_width, cls]; predicted masks
-                n_targets_per_sample: [batch] the number of target ROIs in each sample
+        :return: (rpn_class_logits, rpn_bbox_deltas, rcnn_target_class_ids, rcnn_pred_logits,
+                  rcnn_target_deltas, rcnn_pred_deltas, mrcnn_target_mask, mrcnn_pred_mask,
+                  n_targets_per_sample) where:
+            rpn_class_logits: [batch, anchor]; predicted class logits from RPN
+            rpn_bbox_deltas: [batch, anchor, 4]; predicted bounding box deltas
+            rcnn_target_class_ids: [batch, ROI]; RCNN target class IDs
+            rcnn_pred_logits: [batch, ROI, cls]; RCNN predicted class logits
+            rcnn_target_deltas: [batch, ROI, 4]; RCNN target box deltas
+            rcnn_pred_deltas: [batch, ROI, cls, 4]; RCNN predicted box deltas
+            mrcnn_target_mask: [batch, RCNN_TRAIN_ROIS_PER_IMAGE, mask_height, mask_width) Mask targets
+            mrcnn_pred_mask: [batch, detection, mask_height, mask_width, cls] class specific mask predicted probabilities
+            n_targets_per_sample: [batch] the number of target ROIs in each sample
         """
-        device = molded_images.device
+        device = images.device
 
         # Get image size
-        image_size = molded_images.size()[2:]
+        image_size = images.size()[2:]
 
         # Compute scale factor for converting normalized co-ordinates to pixel co-ordinates
         h, w = image_size
@@ -603,7 +664,7 @@ class AbstractMaskRCNNModel (FasterRCNNBaseModel):
         nms_threshold =  self.config.RPN_NMS_THRESHOLD
         proposal_count = self.config.RPN_POST_NMS_ROIS_TRAINING
         rpn_feature_maps, mrcnn_feature_maps, rpn_class_logits, rpn_bbox, rpn_rois, _, n_rois_per_sample = \
-            self._feature_maps_rpn_preds_and_roi(molded_images, pre_nms_limit, nms_threshold, proposal_count)
+            self._feature_maps_rpn_preds_and_roi(images, pre_nms_limit, nms_threshold, proposal_count)
 
         # Normalize coordinates
         gt_boxes_nrm = gt_boxes / scale
@@ -621,9 +682,8 @@ class AbstractMaskRCNNModel (FasterRCNNBaseModel):
             # Note that proposal class IDs, gt_boxes, and gt_masks are zero
             # padded. Equally, returned rois and targets are zero padded.
             rois, mrcnn_class_logits, mrcnn_class, mrcnn_bbox, target_class_ids, target_deltas, target_mask, n_targets_per_sample = \
-                maskrcnn_detection_target_layer(
-                    rpn_rois, roi_class_logits, roi_class, roi_bbox, n_rois_per_sample,
-                    gt_class_ids, gt_boxes_nrm, gt_masks, n_gts_per_sample, self.config, hard_negative_mining)
+                maskrcnn_detection_target_batch(self.config, rpn_rois, roi_class_logits, roi_class, roi_bbox, n_rois_per_sample,
+                                                gt_class_ids, gt_boxes_nrm, gt_masks, n_gts_per_sample, hard_negative_mining)
 
             if is_empty(rois):
                 mrcnn_mask = torch.zeros([0], dtype=torch.float, device=device)
@@ -637,10 +697,8 @@ class AbstractMaskRCNNModel (FasterRCNNBaseModel):
             # Note that proposal class IDs, gt_boxes, and gt_masks are zero
             # padded. Equally, returned rois and targets are zero padded.
             rois, _, _, _, target_class_ids, target_deltas, target_mask, n_targets_per_sample = \
-                maskrcnn_detection_target_layer(
-                    rpn_rois, None, None, None, n_rois_per_sample,
-                    gt_class_ids, gt_boxes_nrm, gt_masks, n_gts_per_sample, self.config,
-                    hard_negative_mining)
+                maskrcnn_detection_target_batch(self.config, rpn_rois, None, None, None, n_rois_per_sample, gt_class_ids, gt_boxes_nrm,
+                                                gt_masks, n_gts_per_sample, hard_negative_mining)
 
 
             if max(n_targets_per_sample) == 0:

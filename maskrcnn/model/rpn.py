@@ -17,9 +17,9 @@ class RPNHead (nn.Module):
     anchors_per_location: number of anchors per pixel in the feature map
     anchor_stride: Controls the density of anchors. Typically 1 (anchors for
                    every pixel in the feature map), or 2 (every other pixel).
-    depth: number of channels in hidden layers
+    depth: number of channels per feature map pixel incoming from FPN
 
-    Returns:
+    Invoking this model returns (rpn_logits, rpn_probs, rpn_bbox):
         rpn_logits: [batch, H, W, 2] Anchor classifier logits (before softmax)
         rpn_probs: [batch, W, W, 2] Anchor classifier probabilities.
         rpn_bbox: [batch, H, W, (dy, dx, log(dh), log(dw))] Deltas to be
