@@ -392,9 +392,9 @@ def detection_layer(config, rois, rcnn_class, rcnn_bbox, n_rois_per_sample, imag
 def compute_rcnn_class_loss(target_class_ids, pred_class_logits):
     """Loss for the classifier head of Mask RCNN.
 
-    target_class_ids: [batch, num_rois]. Integer class IDs. Uses zero
+    target_class_ids: [num_rois]. Integer class IDs. Uses zero
         padding to fill in the array.
-    pred_class_logits: [batch, num_rois, num_classes]
+    pred_class_logits: [num_rois, num_classes]
     """
 
     # Loss
@@ -410,9 +410,9 @@ def compute_rcnn_class_loss(target_class_ids, pred_class_logits):
 def compute_rcnn_bbox_loss(target_bbox, target_class_ids, pred_bbox):
     """Loss for Mask R-CNN bounding box refinement.
 
-    target_bbox: [batch, num_rois, (dy, dx, log(dh), log(dw))]
-    target_class_ids: [batch, num_rois]. Integer class IDs.
-    pred_bbox: [batch, num_rois, num_classes, (dy, dx, log(dh), log(dw))]
+    target_bbox: [num_rois, (dy, dx, log(dh), log(dw))]
+    target_class_ids: [num_rois]. Integer class IDs.
+    pred_bbox: [num_rois, num_classes, (dy, dx, log(dh), log(dw))]
     """
     device = pred_bbox.device
 
@@ -897,6 +897,25 @@ class AbstractFasterRCNNModel (FasterRCNNBaseModel):
     Adds training and detection forward passes to FasterRCNNBaseModel
     """
     def _train_forward(self, molded_images, gt_class_ids, gt_boxes, n_gts_per_sample, hard_negative_mining=False):
+        """Supervised forward training pass helper
+
+        molded_images: Tensor of images
+        gt_class_ids: ground truth detection classes [batch, detection]
+        gt_boxes: ground truth detection boxes [batch, detection, [y1, x1, y2, x2]
+        n_gts_per_sample: number of ground truth detections per sample [batch]
+        hard_negative_mining: if True, use hard negative mining to choose samples for training R-CNN head
+
+        Returns:
+            (rpn_class_logits, rpn_bbox, target_class_ids, rcnn_class_logits,
+                    target_deltas, rcnn_bbox, n_targets_per_sample) where
+                rpn_class_logits: [batch, anchor]; predicted class logits from RPN
+                rpn_bbox: [batch, anchor, 4]; predicted bounding box deltas
+                target_class_ids: [batch, ROI]; RCNN target class IDs
+                rcnn_class_logits: [batch, ROI, cls]; RCNN predicted class logits
+                target_deltas: [batch, ROI, 4]; RCNN target box deltas
+                rcnn_bbox: [batch, ROI, cls, 4]; RCNN predicted box deltas
+                n_targets_per_sample: [batch] the number of target ROIs in each sample
+        """
         device = molded_images.device
 
         # Get image size
@@ -958,6 +977,25 @@ class AbstractFasterRCNNModel (FasterRCNNBaseModel):
 
     @alt_forward_method
     def train_forward(self, molded_images, gt_class_ids, gt_boxes, n_gts_per_sample, hard_negative_mining=False):
+        """Supervised forward training pass
+
+        molded_images: Tensor of images
+        gt_class_ids: ground truth detection classes [batch, detection]
+        gt_boxes: ground truth detection boxes [batch, detection, [y1, x1, y2, x2]
+        n_gts_per_sample: number of ground truth detections per sample [batch]
+        hard_negative_mining: if True, use hard negative mining to choose samples for training R-CNN head
+
+        Returns:
+            (rpn_class_logits, rpn_bbox, target_class_ids, rcnn_class_logits,
+                    target_deltas, rcnn_bbox, n_targets_per_sample) where
+                rpn_class_logits: [batch & ROI]; predicted class logits from RPN
+                rpn_bbox: [batch & ROI, 4]; predicted bounding box deltas
+                target_class_ids: [batch & TGT]; RCNN target class IDs
+                rcnn_class_logits: [batch & TGT, cls]; RCNN predicted class logits
+                target_deltas: [batch & TGT, 4]; RCNN target box deltas
+                rcnn_bbox: [batch & TGT, cls, 4]; RCNN predicted box deltas
+                n_targets_per_sample: [batch] the number of targets in each sample
+        """
         (rpn_class_logits, rpn_bbox, target_class_ids, rcnn_class_logits,
          target_deltas, rcnn_bbox, n_targets_per_sample) = self._train_forward(
             molded_images, gt_class_ids, gt_boxes, n_gts_per_sample, hard_negative_mining=hard_negative_mining)

@@ -904,6 +904,7 @@ class RPNBaseModel (nn.Module):
         :return: (rpn_feature_maps, mrcnn_feature_maps, rpn_class_logits, rpn_bbox_deltas, rpn_rois, n_rois_per_sample) where
             rpn_feature_maps: Feature maps for RPN
             rcnn_feature_maps: Feature maps for RCNN heads
+            rpn_class_logits:
             rpn_rois: proposals in normalized coordinates [batch, rois, (y1, x1, y2, x2)] (Torch tensor)
             roi_scores: proposal objectness scores [batch, rois] (Torch tensor)
             n_rois_per_sample: list giving number of ROIs in each sample in the batch

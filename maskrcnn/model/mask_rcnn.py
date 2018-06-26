@@ -568,6 +568,27 @@ class AbstractMaskRCNNModel (FasterRCNNBaseModel):
 
 
     def _train_forward(self, molded_images, gt_class_ids, gt_boxes, gt_masks, n_gts_per_sample, hard_negative_mining=False):
+        """Supervised forward training pass helper
+
+        molded_images: Tensor of images
+        gt_class_ids: ground truth detection classes [batch, detection]
+        gt_boxes: ground truth detection boxes [batch, detection, [y1, x1, y2, x2]
+        n_gts_per_sample: number of ground truth detections per sample [batch]
+        hard_negative_mining: if True, use hard negative mining to choose samples for training R-CNN head
+
+        Returns:
+            (rpn_class_logits, rpn_bbox, target_class_ids, rcnn_class_logits,
+                    target_deltas, rcnn_bbox, target_mask, mrcnn_mask, n_targets_per_sample) where
+                rpn_class_logits: [batch, anchor]; predicted class logits from RPN
+                rpn_bbox: [batch, anchor, 4]; predicted bounding box deltas
+                target_class_ids: [batch, ROI]; RCNN target class IDs
+                rcnn_class_logits: [batch, ROI, cls]; RCNN predicted class logits
+                target_deltas: [batch, ROI, 4]; RCNN target box deltas
+                rcnn_bbox: [batch, ROI, cls, 4]; RCNN predicted box deltas
+                target_mask: [batch, ROI, mask_height, mask_width]; target masks
+                mrcnn_mask: [batch, ROI, mask_height, mask_width, cls]; predicted masks
+                n_targets_per_sample: [batch] the number of target ROIs in each sample
+        """
         device = molded_images.device
 
         # Get image size
@@ -642,6 +663,27 @@ class AbstractMaskRCNNModel (FasterRCNNBaseModel):
 
     @alt_forward_method
     def train_forward(self, molded_images, gt_class_ids, gt_boxes, gt_masks, n_gts_per_sample, hard_negative_mining=False):
+        """Supervised forward training pass helper
+
+        molded_images: Tensor of images
+        gt_class_ids: ground truth detection classes [batch, detection]
+        gt_boxes: ground truth detection boxes [batch, detection, [y1, x1, y2, x2]
+        n_gts_per_sample: number of ground truth detections per sample [batch]
+        hard_negative_mining: if True, use hard negative mining to choose samples for training R-CNN head
+
+        Returns:
+            (rpn_class_logits, rpn_bbox, target_class_ids, rcnn_class_logits,
+                    target_deltas, rcnn_bbox, target_mask, mrcnn_mask, n_targets_per_sample) where
+                rpn_class_logits: [batch, anchor]; predicted class logits from RPN
+                rpn_bbox: [batch, anchor, 4]; predicted bounding box deltas
+                target_class_ids: [batch, ROI]; RCNN target class IDs
+                rcnn_class_logits: [batch, ROI, cls]; RCNN predicted class logits
+                target_deltas: [batch, ROI, 4]; RCNN target box deltas
+                rcnn_bbox: [batch, ROI, cls, 4]; RCNN predicted box deltas
+                target_mask: [batch, ROI, mask_height, mask_width]; target masks
+                mrcnn_mask: [batch, ROI, mask_height, mask_width, cls]; predicted masks
+                n_targets_per_sample: [batch] the number of target ROIs in each sample
+        """
         (rpn_class_logits, rpn_bbox, target_class_ids, mrcnn_class_logits,
             target_deltas, mrcnn_bbox, target_mask, mrcnn_mask, n_targets_per_sample) = self._train_forward(
                     molded_images, gt_class_ids, gt_boxes, gt_masks, n_gts_per_sample,
