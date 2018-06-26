@@ -10,7 +10,7 @@ from maskrcnn.roialign.crop_and_resize.crop_and_resize import CropAndResizeAlign
 from .utils import not_empty, is_empty, box_refinement, SamePad2d, concatenate_detections, flatten_detections,\
     unflatten_detections, split_detections, torch_tensor_to_int_list
 from .rpn import RPNHead, compute_rpn_losses, compute_rpn_losses_per_sample, alt_forward_method
-from .rcnn import RCNNHead, FasterRCNNBaseModel, detection_layer, pyramid_roi_align, compute_rcnn_bbox_loss,\
+from .rcnn import RCNNHead, FasterRCNNBaseModel, refine_detections_batch, pyramid_roi_align, compute_rcnn_bbox_loss,\
     compute_rcnn_class_loss, bbox_overlaps
 
 
@@ -603,7 +603,7 @@ class AbstractMaskRCNNModel (FasterRCNNBaseModel):
         nms_threshold =  self.config.RPN_NMS_THRESHOLD
         proposal_count = self.config.RPN_POST_NMS_ROIS_TRAINING
         rpn_feature_maps, mrcnn_feature_maps, rpn_class_logits, rpn_bbox, rpn_rois, _, n_rois_per_sample = \
-            self._feature_maps_proposals_and_roi(molded_images, pre_nms_limit, nms_threshold, proposal_count)
+            self._feature_maps_rpn_preds_and_roi(molded_images, pre_nms_limit, nms_threshold, proposal_count)
 
         # Normalize coordinates
         gt_boxes_nrm = gt_boxes / scale
@@ -806,6 +806,8 @@ class AbstractMaskRCNNModel (FasterRCNNBaseModel):
         # rpn_rois: [batch, n_rois_after_nms, 4]
         # roi_scores: [batch, n_rois_after_nms]
         # n_rois_per_sample: [batch]
+        image_size = images.shape[2:]
+
         rpn_feature_maps, mrcnn_feature_maps, rpn_bbox_deltas, rpn_rois, roi_scores, n_rois_per_sample = self.rpn_detect_forward(
             images)
 
@@ -813,7 +815,7 @@ class AbstractMaskRCNNModel (FasterRCNNBaseModel):
         # det_class_ids: [batch, num_detections]
         # det_scores: [batch, num_detections]
         det_boxes, det_class_ids, det_scores, n_dets_per_sample = self.rcnn_detect_forward(
-            images, image_windows, mrcnn_feature_maps, rpn_rois, n_rois_per_sample, override_class=override_class)
+            image_size, image_windows, mrcnn_feature_maps, rpn_rois, n_rois_per_sample, override_class=override_class)
 
         if is_empty(det_boxes) or is_empty(det_class_ids) or is_empty(det_scores):
             # No detections

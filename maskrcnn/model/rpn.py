@@ -11,11 +11,13 @@ from .utils import SamePad2d, compute_overlaps, concatenate_detections, split_de
 ############################################################
 
 class RPNHead (nn.Module):
-    """Builds the model of Region Proposal Network.
+    """Region Proposal Network head model.
 
+    config: configuration object
     anchors_per_location: number of anchors per pixel in the feature map
     anchor_stride: Controls the density of anchors. Typically 1 (anchors for
                    every pixel in the feature map), or 2 (every other pixel).
+    depth: number of channels in hidden layers
 
     Returns:
         rpn_logits: [batch, H, W, 2] Anchor classifier logits (before softmax)
@@ -65,7 +67,7 @@ class RPNHead (nn.Module):
             rpn_probs = self.softmax(rpn_class_logits)
         else:
             rpn_class_logits = rpn_class_logits.view(x.size()[0], -1)
-            # Softmax on last dimension of BG/FG.
+            # Sigmoid to get FG probability
             rpn_probs = F.sigmoid(rpn_class_logits)
 
 
@@ -108,13 +110,15 @@ class RPNHead (nn.Module):
 
 
 ############################################################
-#  Proposal Layer
+#  RPN prediction to proposal conversion
 ############################################################
 
 def apply_box_deltas(boxes, deltas):
     """Applies the given deltas to the given boxes.
-    boxes: [N, 4] where each row is y1, x1, y2, x2
-    deltas: [N, 4] where each row is [dy, dx, log(dh), log(dw)]
+
+    :param boxes: [N, 4] where each row is y1, x1, y2, x2
+    :param deltas: [N, 4] where each row is [dy, dx, log(dh), log(dw)]
+    :return: boxes as a [N, 4] tensor
     """
     # Convert to y, x, h, w
     height = boxes[:, 2] - boxes[:, 0]
@@ -136,8 +140,12 @@ def apply_box_deltas(boxes, deltas):
 
 def clip_boxes(boxes, window):
     """
-    boxes: [N, 4] each col is y1, x1, y2, x2
-    window: [4] in the form y1, x1, y2, x2
+    Clip boxes to lie within window
+
+    :param boxes: [N, 4] each col is y1, x1, y2, x2
+    :param window: [4] in the form y1, x1, y2, x2
+    :return: clipped boxes as a [N, 4] tensor
+
     """
     boxes = torch.stack( \
         [boxes[:, 0].clamp(float(window[0]), float(window[2])),
@@ -146,12 +154,12 @@ def clip_boxes(boxes, window):
          boxes[:, 3].clamp(float(window[1]), float(window[3]))], 1)
     return boxes
 
-def proposal_layer_one_sample(rpn_pred_probs, rpn_box_deltas, proposal_count, nms_threshold, anchors,
-                              image_size, pre_nms_limit, config):
+def rpn_preds_to_proposals_one_sample(rpn_pred_probs, rpn_box_deltas, proposal_count, nms_threshold, anchors,
+                                      image_size, pre_nms_limit, config):
     """Receives anchor scores and selects a subset to pass as proposals
     to the second stage. Filtering is done based on anchor scores and
     non-max suppression to remove overlaps. It also applies bounding
-    box refinment detals to anchors.
+    box refinement deltas to anchors.
 
     :param rpn_pred_probs: predicted background/foreground probabilities from region proposal network RPN
         Either:
@@ -163,7 +171,7 @@ def proposal_layer_one_sample(rpn_pred_probs, rpn_box_deltas, proposal_count, nm
         (anchors, 4) array  where the last dimension is [dy, dx, log(dh), log(dw)]
     :param proposal_count: maximum number of proposals to be generated
     :param nms_threshold: Non-maximum suppression threshold
-    :param anchors: Anchors as a (A,4) Torch tenspr
+    :param anchors: Anchors as a (A,4) Torch tensor
     :param image_size: image size as a (height, width) tuple
     :param pre_nms_limit: number of pre-NMS boxes to consider
     :param config:
@@ -221,20 +229,20 @@ def proposal_layer_one_sample(rpn_pred_probs, rpn_box_deltas, proposal_count, nm
     return normalized_boxes, scores
 
 
-def proposal_layer(rpn_pred_probs, rpn_box_deltas, proposal_count, nms_threshold, anchors,
-                   image_size, pre_nms_limit, config=None):
+def rpn_preds_to_proposals(rpn_pred_probs, rpn_box_deltas, proposal_count, nms_threshold, anchors,
+                           image_size, pre_nms_limit, config=None):
     """Receives anchor scores and selects a subset to pass as proposals
     to the second stage. Filtering is done based on anchor scores and
     non-max suppression to remove overlaps. It also applies bounding
     box refinment detals to anchors.
 
-    :param rpn_probs: predicted background/foreground probabilities from region proposal network RPN
+    :param rpn_pred_probs: predicted background/foreground probabilities from region proposal network RPN
         (batch, anchors, 2) array  where the last dimension is [bg_prob, fg_prob]
     :param rpn_box_deltas: predicted bounding box deltas from region proposal network RPN
         (batch, anchors, 4) array  where the last dimension is [dy, dx, log(dh), log(dw)]
     :param proposal_count: maximum number of proposals to be generated
     :param nms_threshold: Non-maximum suppression threshold
-    :param anchors: Anchors as a (A,4) Torch tenspr
+    :param anchors: Anchors as a (A,4) Torch tensor
     :param image_size: image size as a (height, width) tuple
     :param pre_nms_limit: number of pre-NMS boxes to consider
     :param config:
@@ -246,9 +254,9 @@ def proposal_layer(rpn_pred_probs, rpn_box_deltas, proposal_count, nms_threshold
     normalized_boxes = []
     scores = []
     for sample_i in range(rpn_pred_probs.size()[0]):
-        norm_boxes, sample_scores = proposal_layer_one_sample(rpn_pred_probs[sample_i], rpn_box_deltas[sample_i],
-                                                              proposal_count, nms_threshold,
-                                                              anchors, image_size, pre_nms_limit, config)
+        norm_boxes, sample_scores = rpn_preds_to_proposals_one_sample(rpn_pred_probs[sample_i], rpn_box_deltas[sample_i],
+                                                                      proposal_count, nms_threshold,
+                                                                      anchors, image_size, pre_nms_limit, config)
         normalized_boxes.append(norm_boxes.unsqueeze(0))
         scores.append(sample_scores.unsqueeze(0))
 
@@ -257,8 +265,8 @@ def proposal_layer(rpn_pred_probs, rpn_box_deltas, proposal_count, nms_threshold
     return normalized_boxes, scores, n_boxes_per_sample
 
 
-def proposal_layer_by_level(rpn_pred_probs_by_lvl, rpn_box_deltas_by_lvl, proposal_count, nms_threshold, anchors_by_lvl,
-                            image_size, pre_nms_limit, config=None):
+def rpn_preds_to_proposals_by_level(rpn_pred_probs_by_lvl, rpn_box_deltas_by_lvl, proposal_count, nms_threshold, anchors_by_lvl,
+                                    image_size, pre_nms_limit, config=None):
     """Receives anchor scores and selects a subset to pass as proposals
     to the second stage. Filtering is done based on anchor scores and
     non-max suppression to remove overlaps. It also applies bounding
@@ -266,13 +274,15 @@ def proposal_layer_by_level(rpn_pred_probs_by_lvl, rpn_box_deltas_by_lvl, propos
 
     Processes FPN levels separately
 
-    :param rpn_probs: predicted background/foreground probabilities from region proposal network RPN
-        (batch, anchors, 2) array  where the last dimension is [bg_prob, fg_prob]
-    :param rpn_box_deltas: predicted bounding box deltas from region proposal network RPN
-        (batch, anchors, 4) array  where the last dimension is [dy, dx, log(dh), log(dw)]
+    :param rpn_pred_probs_by_lvl: predicted background/foreground probabilities from region proposal network RPN
+        list of (batch, anchors, 2) arrays where the last dimension is [bg_prob, fg_prob]; one array for each
+        FPN level
+    :param rpn_box_deltas_by_lvl: predicted bounding box deltas from region proposal network RPN
+        list (batch, anchors, 4) arrays where the last dimension is [dy, dx, log(dh), log(dw)]; one for each
+        FPN level
     :param proposal_count: maximum number of proposals to be generated
     :param nms_threshold: Non-maximum suppression threshold
-    :param anchors: Anchors as a (A,4) Torch tenspr
+    :param anchors_by_lvl: Anchors as a list of (A,4) Torch tensors; one for each FPN level
     :param image_size: image size as a (height, width) tuple
     :param pre_nms_limit: number of pre-NMS boxes to consider
     :param config:
@@ -288,9 +298,9 @@ def proposal_layer_by_level(rpn_pred_probs_by_lvl, rpn_box_deltas_by_lvl, propos
         sample_scores = []
         for lvl_i, (rpn_pred_probs, rpn_box_deltas, anchors) in enumerate(zip(
                 rpn_pred_probs_by_lvl, rpn_box_deltas_by_lvl, anchors_by_lvl)):
-            lvl_boxes, lvl_scores = proposal_layer_one_sample(rpn_pred_probs[sample_i], rpn_box_deltas[sample_i],
-                                                              proposal_count, nms_threshold,
-                                                              anchors, image_size, pre_nms_limit, config)
+            lvl_boxes, lvl_scores = rpn_preds_to_proposals_one_sample(rpn_pred_probs[sample_i], rpn_box_deltas[sample_i],
+                                                                      proposal_count, nms_threshold,
+                                                                      anchors, image_size, pre_nms_limit, config)
             sample_nrm_boxes.append(lvl_boxes)
             sample_scores.append(lvl_scores)
         sample_nrm_boxes = torch.cat(sample_nrm_boxes, 0)
@@ -310,14 +320,25 @@ def proposal_layer_by_level(rpn_pred_probs_by_lvl, rpn_box_deltas_by_lvl, propos
 
 
 ############################################################
-#  Loss Functions
+#  RPN Loss Functions
 ############################################################
 
 RPN_CLS_POSITIVE = 1
 RPN_CLS_NEGATIVE = -1
 RPN_CLS_NEUTRAL = 0
 
-def focal_loss(class_logits, targets, num_pos_samples, weight=1.0, alpha=0.25, gamma=2.0):
+def focal_loss_with_logits(class_logits, targets, num_pos_samples, weight=1.0, alpha=0.25, gamma=2.0):
+    """
+    Compute focal loss with predicted logits
+
+    :param class_logits: predicted class logits as a [sample, class] tensor
+    :param targets: per-sample class index as a [sample] tensor
+    :param num_pos_samples: number of positive samples, used for normalization
+    :param weight: per-sample and per-class weight as a [sample, class] tensor
+    :param alpha: alpha value for alpha balancing
+    :param gamma: focal loss exponent
+    :return: focal loss as a torch scalar
+    """
     # One hot representation of targets
     targets_one_hot = torch.zeros_like(class_logits)
     targets_one_hot.scatter_(1, targets[:, None], 1)
@@ -341,13 +362,18 @@ def compute_rpn_losses(config, rpn_pred_class_logits, rpn_pred_bbox, rpn_target_
                        rpn_target_num_pos_per_sample):
     """RPN anchor classifier loss.
 
-    rpn_pred_class_logits: [batch, anchors, 2]. RPN classifier logits for FG/BG.
-    rpn_pred_bbox: [batch, anchors, (dy, dx, log(dh), log(dw))]
-    rpn_target_match: [batch, anchors, 1]. Anchor match type. 1=positive,
+    :param config: configuration object
+    :param rpn_pred_class_logits: [batch, anchors, 2] RPN classifier logits for FG/BG if using softmax or focal loss for
+        RPN class (see config.RPN_OBJECTNESS_FUNCTION),
+        [batch, anchors] RPN classifier FG logits if using sigmoid.
+    :param rpn_pred_bbox: [batch, anchors, (dy, dx, log(dh), log(dw))]
+    :param rpn_target_match: [batch, anchors]. Anchor match type. 1=positive,
                -1=negative, 0=neutral anchor.
-    rpn_target_bbox: [batch, max positive anchors, (dy, dx, log(dh), log(dw))].
+    :param rpn_target_bbox: [batch, max positive anchors, (dy, dx, log(dh), log(dw))].
         Uses 0 padding to fill in unsed bbox deltas.
-    rpn_target_num_pos_per_sample: [batch] number of positives per sample
+    :param rpn_target_num_pos_per_sample: [batch] number of positives per sample
+
+    :return: (cls_loss, box_loss) where cls_loss and box_loss are the RPN objectness and box losses as torch scalars
     """
     rpn_target_num_pos_per_sample = torch_tensor_to_int_list(rpn_target_num_pos_per_sample)
 
@@ -396,9 +422,9 @@ def compute_rpn_losses(config, rpn_pred_class_logits, rpn_pred_bbox, rpn_target_
     elif config.RPN_OBJECTNESS_FUNCTION == 'focal':
         # Focal loss
         num_pos = anchor_class.sum().float()
-        cls_loss = focal_loss(rpn_pred_class_logits, anchor_class, num_pos,
-                              weight=weight, alpha=config.RPN_FOCAL_LOSS_POS_CLS_WEIGHT,
-                              gamma=config.RPN_FOCAL_LOSS_EXPONENT)
+        cls_loss = focal_loss_with_logits(rpn_pred_class_logits, anchor_class, num_pos,
+                                          weight=weight, alpha=config.RPN_FOCAL_LOSS_POS_CLS_WEIGHT,
+                                          gamma=config.RPN_FOCAL_LOSS_EXPONENT)
         box_loss = (F.smooth_l1_loss(rpn_box_for_loss, tgt_box_for_loss, reduce=False) * weight).sum() / num_pos
     else:
         raise ValueError('Invalid value {} for config.RPN_OBJECTNESS_FUNCTION'.format(
@@ -411,13 +437,18 @@ def compute_rpn_losses_per_sample(config, rpn_pred_class_logits, rpn_pred_bbox, 
                                   rpn_target_num_pos_per_sample):
     """RPN anchor classifier loss.
 
-    rpn_match: [batch, anchors, 1]. Anchor match type. 1=positive,
+    :param config: configuration object
+    :param rpn_pred_class_logits: [batch, anchors, 2] RPN classifier logits for FG/BG if using softmax or focal loss for
+        RPN class (see config.RPN_OBJECTNESS_FUNCTION),
+        [batch, anchors] RPN classifier FG logits if using sigmoid.
+    :param rpn_pred_bbox: [batch, anchors, (dy, dx, log(dh), log(dw))]
+    :param rpn_target_match: [batch, anchors]. Anchor match type. 1=positive,
                -1=negative, 0=neutral anchor.
-    rpn_class_logits: [batch, anchors, 2]. RPN classifier logits for FG/BG.
-    target_bbox: [batch, max positive anchors, (dy, dx, log(dh), log(dw))].
+    :param rpn_target_bbox: [batch, max positive anchors, (dy, dx, log(dh), log(dw))].
         Uses 0 padding to fill in unsed bbox deltas.
-    rpn_bbox: [batch, anchors, (dy, dx, log(dh), log(dw))]
-    rpn_num_pos_per_sample: [batch] number of positives per sample
+    :param rpn_target_num_pos_per_sample: [batch] number of positives per sample
+
+    :return: (cls_loss, box_loss) where cls_loss and box_loss are the RPN objectness and box losses as torch scalars
     """
 
     if len(rpn_target_match.size()) == 3:
@@ -477,9 +508,9 @@ def compute_rpn_losses_per_sample(config, rpn_pred_class_logits, rpn_pred_bbox, 
         elif config.RPN_OBJECTNESS_FUNCTION == 'focal':
             # Cross-entropy loss
             num_pos = sample_anchor_class.sum().float()
-            cls_loss = focal_loss(sample_class_logits, sample_anchor_class, num_pos,
-                              weight=weight, alpha=config.RPN_FOCAL_LOSS_POS_CLS_WEIGHT,
-                              gamma=config.RPN_FOCAL_LOSS_EXPONENT)
+            cls_loss = focal_loss_with_logits(sample_class_logits, sample_anchor_class, num_pos,
+                                              weight=weight, alpha=config.RPN_FOCAL_LOSS_POS_CLS_WEIGHT,
+                                              gamma=config.RPN_FOCAL_LOSS_EXPONENT)
             if n_pos > 0:
                 box_loss = (F.smooth_l1_loss(sample_rpn_bbox, sample_pos_target_box, reduce=False) * weight).sum() / num_pos
             else:
@@ -498,20 +529,24 @@ def compute_rpn_losses_per_sample(config, rpn_pred_class_logits, rpn_pred_bbox, 
 #  Target generation
 ############################################################
 
-def build_rpn_targets_balanced(image_shape, anchors, valid_anchors_mask, gt_class_ids, gt_boxes, config):
+def build_rpn_targets_balanced(config, anchors, valid_anchors_mask, gt_class_ids, gt_boxes):
     """Given the anchors and GT boxes, compute overlaps and identify positive
     anchors and deltas to refine them to match their corresponding GT boxes.
 
-    anchors: [num_anchors, (y1, x1, y2, x2)]
-    valid_anchors_mask: [num_anchors]
-    gt_class_ids: [num_gt_boxes] Integer class IDs.
-    gt_boxes: [num_gt_boxes, (y1, x1, y2, x2)]
+    Only `config.RPN_TRAIN_ANCHORS_PER_IMAGE` anchors will have non-neutral values and at most
+    `config.RPN_TRAIN_ANCHORS_PER_IMAGE` box deltas with be generated
 
-    Returns:
-    rpn_match: [N] (int32) matches between anchors and GT boxes.
-               1 = positive anchor, -1 = negative anchor, 0 = neutral
-    rpn_bbox: [N, (dy, dx, log(dh), log(dw))] Anchor bbox deltas.
-    num_positives: int; number of positives
+    :param config: configuration object
+    :param anchors: [num_anchors, (y1, x1, y2, x2)]
+    :param valid_anchors_mask: [num_anchors]
+    :param gt_class_ids: [num_gt_boxes] Integer class IDs.
+    :param gt_boxes: [num_gt_boxes, (y1, x1, y2, x2)]
+
+    :return: (rpn_target_match, rpn_bbox_deltas, num_positives) where
+        rpn_target_match: NumPy array [num_anchors] (int32) matches between anchors and GT boxes.
+                      1 = positive anchor, -1 = negative anchor, 0 = neutral
+        rpn_bbox_deltas: NumPy array [M, (dy, dx, log(dh), log(dw))] Anchor bbox deltas (M = number of boxes)
+        num_positives: int; number of positives
     """
 
     # RPN Match: 1 = positive anchor, -1 = negative anchor, 0 = neutral
@@ -625,19 +660,23 @@ def build_rpn_targets_balanced(image_shape, anchors, valid_anchors_mask, gt_clas
     return rpn_match_all, rpn_bbox, np.count_nonzero(rpn_match == RPN_CLS_POSITIVE)
 
 
-def build_rpn_targets_all(image_shape, anchors, valid_anchors_mask, gt_class_ids, gt_boxes, config):
+def build_rpn_targets_all(config, anchors, valid_anchors_mask, gt_class_ids, gt_boxes):
     """Given the anchors and GT boxes, compute overlaps and identify positive
     anchors and deltas to refine them to match their corresponding GT boxes.
 
-    anchors: [num_anchors, (y1, x1, y2, x2)]
-    valid_anchors_mask: [num_anchors]
-    gt_class_ids: [num_gt_boxes] Integer class IDs.
-    gt_boxes: [num_gt_boxes, (y1, x1, y2, x2)]
+    All targets that can be assigned are generated
 
-    Returns:
-    rpn_match: [N] (int32) matches between anchors and GT boxes.
-               1 = positive anchor, -1 = negative anchor, 0 = neutral
-    rpn_bbox: [N, (dy, dx, log(dh), log(dw))] Anchor bbox deltas.
+    :param config: configuration object
+    :param anchors: [num_anchors, (y1, x1, y2, x2)]
+    :param valid_anchors_mask: [num_anchors]
+    :param gt_class_ids: [num_gt_boxes] Integer class IDs.
+    :param gt_boxes: [num_gt_boxes, (y1, x1, y2, x2)]
+
+    :return: (rpn_target_match, rpn_bbox_deltas, num_positives) where
+        rpn_target_match: NumPy array [num_anchors] (int32) matches between anchors and GT boxes.
+                      1 = positive anchor, -1 = negative anchor, 0 = neutral
+        rpn_bbox_deltas: NumPy array [num_anchors, (dy, dx, log(dh), log(dw))] Anchor bbox deltas.
+        num_positives: int; number of positives
     """
 
     # RPN Match: 1 = positive anchor, -1 = negative anchor, 0 = neutral
@@ -778,19 +817,46 @@ class RPNBaseModel (nn.Module):
 
 
     def ground_truth_to_rpn_targets(self, image_shape, gt_class_ids, gt_boxes):
+        """
+        Generate RPN training targets given image shape and ground truth
+        :param image_shape: image size as a tuple (height, width)
+        :param gt_class_ids: ground truth box class IDs as a [N] array
+        :param gt_boxes: ground truth boxes as a [N, 4] array
+        :return: (rpn_target_match, rpn_bbox_deltas, num_positives)
+            rpn_target_match: NumPy array [num_anchors] (int32) matches between anchors and GT boxes.
+                              1 = positive anchor, -1 = negative anchor, 0 = neutral
+            rpn_bbox_deltas: NumPy array [M, (dy, dx, log(dh), log(dw))] Anchor bbox deltas (M = number of boxes)
+            num_positives: int; number of positives
+        """
         anchors, valid_mask = self.config.ANCHOR_CACHE.get_anchors_and_valid_masks_for_image_shape(image_shape)
         if self.config.RPN_TRAIN_ANCHORS_PER_IMAGE is not None:
-            rpn_match, rpn_bbox, num_positives = build_rpn_targets_balanced(image_shape, anchors, valid_mask,
-                                                                            gt_class_ids, gt_boxes, self.config)
+            rpn_match, rpn_bbox, num_positives = build_rpn_targets_balanced(self.config, anchors, valid_mask,
+                                                                            gt_class_ids, gt_boxes)
         else:
-            rpn_match, rpn_bbox, num_positives = build_rpn_targets_all(image_shape, anchors, valid_mask,
-                                                                       gt_class_ids, gt_boxes, self.config)
+            rpn_match, rpn_bbox, num_positives = build_rpn_targets_all(self.config, anchors, valid_mask, gt_class_ids,
+                                                                       gt_boxes)
         return rpn_match, rpn_bbox, num_positives
 
 
-    def _feature_maps_and_proposals_all(self, molded_images):
+    def _feature_maps_and_rpn_preds_all(self, images):
+        """
+        Generate feature maps and RPN predictions for given images.
+        Joins output from FPN levels.
+
+        :param images: images as a [batch, channel, height, width] tensor
+        :return: (rpn_feature_maps, mrcnn_feature_maps, rpn_class_logits, rpn_class_probs, rpn_bbox_deltas):
+            rpn_feature_maps: per-FPN level feature maps for RPN;
+                list of [batch, feat_chn, lvl_height, lvl_width] tensors
+            mrcnn_feature_maps: per-FPN level feature maps for RCNN;
+                list of [batch, feat_chn, lvl_height, lvl_width] tensors
+            rpn_class_logits: [batch, num_anchors, 2] or [batch, num_anchors] (depending on
+                `self.config.RPN_OBJECTNESS_FUNCTION`) RPN class logit predictions
+            rpn_class_probs: [batch, num_anchors, 2] or [batch, num_anchors] (depending on
+                `self.config.RPN_OBJECTNESS_FUNCTION`) RPN class probability predictions
+            rpn_bbox_deltas: [batch, num_anchors, 4] RPN box delta predictions
+        """
         # Feature extraction
-        rpn_feature_maps, mrcnn_feature_maps = self.fpn(molded_images)
+        rpn_feature_maps, mrcnn_feature_maps = self.fpn(images)
 
         # Loop through pyramid layers
         layer_outputs = []  # list of lists
@@ -808,25 +874,33 @@ class RPNBaseModel (nn.Module):
         return rpn_feature_maps, mrcnn_feature_maps, rpn_class_logits, rpn_class_probs, rpn_bbox_deltas
 
 
-    def _feature_maps_proposals_and_roi_all(self, molded_images, pre_nms_limit, nms_threshold, proposal_count):
+    def _feature_maps_roi_preds_and_roi_all(self, images, pre_nms_limit, nms_threshold, proposal_count):
         """
-        :param molded_images: images to process
+        Generate feature maps, RPN predictions and proposed boxes for given images
+        Joins output from FPN levels.
+
+        :param images: images to process
         :param pre_nms_limit: number of proposals to pass prior to NMS
         :param nms_threshold: the NMS threshold to use
         :param proposal_count: number of proposals to pass subsequent to NMS
         :return: (rpn_feature_maps, mrcnn_feature_maps, rpn_class_logits, rpn_bbox_deltas, rpn_rois, n_rois_per_sample) where
-            rpn_feature_maps: Feature maps for RPN
-            rcnn_feature_maps: Feature maps for RCNN heads
+            rpn_feature_maps: per-FPN level feature maps for RPN;
+                list of [batch, feat_chn, lvl_height, lvl_width] tensors
+            mrcnn_feature_maps: per-FPN level feature maps for RCNN;
+                list of [batch, feat_chn, lvl_height, lvl_width] tensors
+            rpn_class_logits: [batch, num_anchors, 2] or [batch, num_anchors] (depending on 
+                `self.config.RPN_OBJECTNESS_FUNCTION`) RPN class logit predictions
+            rpn_bbox_deltas: [batch, num_anchors, 4] RPN box delta predictions
             rpn_rois: proposals in normalized coordinates [batch, rois, (y1, x1, y2, x2)] (Torch tensor)
             roi_scores: proposal objectness scores [batch, rois] (Torch tensor)
             n_rois_per_sample: list giving number of ROIs in each sample in the batch
         """
-        device = molded_images.device
+        device = images.device
 
         rpn_feature_maps, rcnn_feature_maps, rpn_class_logits, rpn_class_probs, rpn_bbox_deltas = \
-            self._feature_maps_and_proposals_all(molded_images)
+            self._feature_maps_and_rpn_preds_all(images)
 
-        image_size = tuple(molded_images.size()[2:])
+        image_size = tuple(images.size()[2:])
 
         # Get anchors
         anchs_var = self.config.ANCHOR_CACHE.get_anchors_var_for_image_shape(image_size, device)
@@ -834,7 +908,7 @@ class RPNBaseModel (nn.Module):
         # Generate proposals
         # Proposals are [batch, N, (y1, x1, y2, x2)] in normalized coordinates
         # and zero padded.
-        rpn_rois, roi_scores, n_rois_per_sample = proposal_layer(
+        rpn_rois, roi_scores, n_rois_per_sample = rpn_preds_to_proposals(
             rpn_class_probs, rpn_bbox_deltas, proposal_count=proposal_count,
             nms_threshold=nms_threshold,
             anchors=anchs_var, image_size=image_size,
@@ -843,9 +917,25 @@ class RPNBaseModel (nn.Module):
         return rpn_feature_maps, rcnn_feature_maps, rpn_class_logits, rpn_bbox_deltas, rpn_rois, roi_scores, n_rois_per_sample
 
 
-    def _feature_maps_and_proposals_by_level(self, molded_images):
+    def _feature_maps_and_rpn_preds_by_level(self, images):
+        """
+        Generate feature maps and RPN predictions per FPN pyramid level for given images
+
+        :param images: images as a [batch, channel, height, width] tensor
+        :return: (rpn_feature_maps, mrcnn_feature_maps, rpn_class_logits_by_lvl, rpn_class_probs_by_lvl,
+                  rpn_bbox_deltas_by_lvl):
+            rpn_feature_maps: per-FPN level feature maps for RPN;
+                list of [batch, feat_chn, lvl_height, lvl_width] tensors
+            mrcnn_feature_maps: per-FPN level feature maps for RCNN;
+                list of [batch, feat_chn, lvl_height, lvl_width] tensors
+            rpn_class_logits_by_lvl: list of [batch, num_anchors, 2] or [batch, num_anchors] (depending on
+                `self.config.RPN_OBJECTNESS_FUNCTION`) RPN class logit predictions; one per level
+            rpn_class_probs_by_lvl: list of [batch, num_anchors, 2] or [batch, num_anchors] (depending on
+                `self.config.RPN_OBJECTNESS_FUNCTION`) RPN class probability predictions; one per level
+            rpn_bbox_deltas_by_lvl: list of [batch, num_anchors, 4] RPN box delta predictions; one per level
+        """
         # Feature extraction
-        rpn_feature_maps, mrcnn_feature_maps = self.fpn(molded_images)
+        rpn_feature_maps, mrcnn_feature_maps = self.fpn(images)
 
         # Loop through pyramid layers
         layer_outputs = []  # list of lists
@@ -861,25 +951,34 @@ class RPNBaseModel (nn.Module):
         return rpn_feature_maps, mrcnn_feature_maps, rpn_class_logits_by_lvl, rpn_class_probs_by_lvl, rpn_bbox_deltas_by_lvl
 
 
-    def _feature_maps_proposals_and_roi_by_level(self, molded_images, pre_nms_limit, nms_threshold, proposal_count):
+    def _feature_maps_rpn_preds_and_roi_by_level(self, images, pre_nms_limit, nms_threshold, proposal_count):
         """
-        :param molded_images: images to process
+        Generate feature maps, RPN predictions per FPN pyramid level and proposed boxes for given images.
+        The box proposals are generated separately for each FPN level then joined
+
+        :param images: images to process
         :param pre_nms_limit: number of proposals to pass prior to NMS
         :param nms_threshold: the NMS threshold to use
         :param proposal_count: number of proposals to pass subsequent to NMS
-        :return: (rpn_feature_maps, mrcnn_feature_maps, rpn_class_logits, rpn_bbox_deltas, rpn_rois, n_rois_per_sample) where
-            rpn_feature_maps: Feature maps for RPN
-            rcnn_feature_maps: Feature maps for RCNN heads
+        :return: (rpn_feature_maps, mrcnn_feature_maps, rpn_class_logits_by_lvl, rpn_bbox_deltas_by_lvl, rpn_rois,
+                  n_rois_per_sample) where
+            rpn_feature_maps: per-FPN level feature maps for RPN;
+                list of [batch, feat_chn, lvl_height, lvl_width] tensors
+            mrcnn_feature_maps: per-FPN level feature maps for RCNN;
+                list of [batch, feat_chn, lvl_height, lvl_width] tensors
+            rpn_class_logits_by_lvl: list of [batch, num_anchors, 2] or [batch, num_anchors] (depending on
+                `self.config.RPN_OBJECTNESS_FUNCTION`) RPN class logit predictions; one per level
+            rpn_bbox_deltas_by_lvl: list of [batch, num_anchors, 4] RPN box delta predictions; one per level
             rpn_rois: proposals in normalized coordinates [batch, rois, (y1, x1, y2, x2)] (Torch tensor)
             roi_scores: proposal objectness scores [batch, rois] (Torch tensor)
             n_rois_per_sample: list giving number of ROIs in each sample in the batch
         """
-        device = molded_images.device
+        device = images.device
 
         rpn_feature_maps, rcnn_feature_maps, rpn_class_logits_by_lvl, rpn_class_probs_by_lvl, rpn_bbox_deltas_by_lvl = \
-            self._feature_maps_and_proposals_by_level(molded_images)
+            self._feature_maps_and_rpn_preds_by_level(images)
 
-        image_size = tuple(molded_images.size()[2:])
+        image_size = tuple(images.size()[2:])
 
         # Get anchors
         anchs_vars = self.config.ANCHOR_CACHE.get_anchors_var_for_image_shape_by_level(image_size, device)
@@ -887,7 +986,7 @@ class RPNBaseModel (nn.Module):
         # Generate proposals
         # Proposals are [batch, N, (y1, x1, y2, x2)] in normalized coordinates
         # and zero padded.
-        rpn_rois, roi_scores, n_rois_per_sample = proposal_layer_by_level(
+        rpn_rois, roi_scores, n_rois_per_sample = rpn_preds_to_proposals_by_level(
             rpn_class_probs_by_lvl, rpn_bbox_deltas_by_lvl, proposal_count=proposal_count,
             nms_threshold=nms_threshold,
             anchors_by_lvl=anchs_vars, image_size=image_size,
@@ -897,46 +996,52 @@ class RPNBaseModel (nn.Module):
                rpn_rois, roi_scores, n_rois_per_sample
 
 
-    def _feature_maps_proposals_and_roi(self, molded_images, pre_nms_limit, nms_threshold, proposal_count):
+    def _feature_maps_rpn_preds_and_roi(self, images, pre_nms_limit, nms_threshold, proposal_count):
         """
-        :param molded_images:
-        :param proposal_count:
+        Generate feature maps, RPN predictions and proposed boxes for given images.
+        Will generate proposals in one go or separately per FPN pyramid level then join depending on the value
+        of `self.config.RPN_FILTER_PROPOSALS_BY_LEVEL`.
+
+        :param images: images to process
+        :param pre_nms_limit: number of proposals to pass prior to NMS
+        :param nms_threshold: the NMS threshold to use
+        :param proposal_count: number of proposals to pass subsequent to NMS
         :return: (rpn_feature_maps, mrcnn_feature_maps, rpn_class_logits, rpn_bbox_deltas, rpn_rois, n_rois_per_sample) where
-            rpn_feature_maps: Feature maps for RPN
-            rcnn_feature_maps: Feature maps for RCNN heads
-            rpn_class_logits:
+            rpn_feature_maps: per-FPN level feature maps for RPN;
+                list of [batch, feat_chn, lvl_height, lvl_width] tensors
+            mrcnn_feature_maps: per-FPN level feature maps for RCNN;
+                list of [batch, feat_chn, lvl_height, lvl_width] tensors
+            rpn_class_logits: [batch, num_anchors, 2] or [batch, num_anchors] (depending on
+                `self.config.RPN_OBJECTNESS_FUNCTION`) RPN class logit predictions
+            rpn_bbox_deltas: [batch, num_anchors, 4] RPN box delta predictions
             rpn_rois: proposals in normalized coordinates [batch, rois, (y1, x1, y2, x2)] (Torch tensor)
             roi_scores: proposal objectness scores [batch, rois] (Torch tensor)
             n_rois_per_sample: list giving number of ROIs in each sample in the batch
         """
         if self.config.RPN_FILTER_PROPOSALS_BY_LEVEL:
             rpn_feature_maps, rcnn_feature_maps, rpn_class_logits_by_lvl, rpn_bbox_deltas_by_lvl, \
-                rpn_rois, roi_scores, n_rois_per_sample = self._feature_maps_proposals_and_roi_by_level(
-                    molded_images, pre_nms_limit, nms_threshold, proposal_count)
+                rpn_rois, roi_scores, n_rois_per_sample = self._feature_maps_rpn_preds_and_roi_by_level(
+                    images, pre_nms_limit, nms_threshold, proposal_count)
             rpn_class_logits = torch.cat(rpn_class_logits_by_lvl, 1)
             rpn_bbox_deltas = torch.cat(rpn_bbox_deltas_by_lvl, 1)
             return rpn_feature_maps, rcnn_feature_maps, rpn_class_logits, rpn_bbox_deltas, rpn_rois, roi_scores, n_rois_per_sample
         else:
-            return self._feature_maps_proposals_and_roi_all(molded_images, pre_nms_limit, nms_threshold, proposal_count)
+            return self._feature_maps_roi_preds_and_roi_all(images, pre_nms_limit, nms_threshold, proposal_count)
 
 
     def rpn_detect_forward(self, images):
         """Runs the RPN stage of the detection pipeline
 
-        images: Tensor of images
+        :param images: Tensor of images
 
-        Returns:
-        # rpn_feature_maps: [batch, channels, height, width]
-        # mrcnn_feature_maps: [batch, channels, height, width]
-        # rpn_bbox: [batch, anchors, 4]
-        # rpn_rois: [batch, n_rois_after_nms, 4]
-        # roi_scores: [batch, n_rois_after_nms]
-        # n_rois_per_sample: [batch]
+        :return: (rpn_feature_maps, mrcnn_feature_maps, rpn_bbox_deltas, rpn_rois, roi_scores, n_rois_per_sample)
+            rpn_feature_maps: list of [batch, channels, height, width] feature maps for RPN; one per FPN pyramid level
+            mrcnn_feature_maps: list of [batch, channels, height, width] feature maps for RCNN; one per FPN pyramid level
+            rpn_bbox_deltas: [batch, anchors, 4] predicted box deltas from RPN
+            rpn_rois: [batch, n_rois_after_nms, 4] RPN proposed boxes in normalized co-ordinates
+            roi_scores: [batch, n_rois_after_nms] RPN box objecness scores
+            n_rois_per_sample: [batch] number of rois per sample in the batch
         """
-        #
-        # Run object detection
-        #
-
         pre_nms_limit =  self.config.RPN_PRE_NMS_LIMIT_TEST
         nms_threshold =  self.config.RPN_NMS_THRESHOLD
         proposal_count = self.config.RPN_POST_NMS_ROIS_INFERENCE
@@ -950,7 +1055,7 @@ class RPNBaseModel (nn.Module):
         # less ROIs passing NMS
         # n_rois_per_sample gives the number of valid ROIs in each sample
         rpn_feature_maps, mrcnn_feature_maps, _, rpn_bbox_deltas, rpn_rois, roi_scores, n_rois_per_sample = \
-            self._feature_maps_proposals_and_roi(images, pre_nms_limit, nms_threshold, proposal_count)
+            self._feature_maps_rpn_preds_and_roi(images, pre_nms_limit, nms_threshold, proposal_count)
 
         return rpn_feature_maps, mrcnn_feature_maps, rpn_bbox_deltas, rpn_rois, roi_scores, n_rois_per_sample
 
@@ -983,26 +1088,47 @@ class AbstractRPNNModel (RPNBaseModel):
 
     Adds training and detection forward passes to RPNBaseModel
     """
-    @alt_forward_method
-    def train_forward(self, molded_images):
+    def train_forward(self, images):
+        """
+        Training forward pass; generates RPN predictions. Compare to targets to compute losses
+
+        :param images: training images
+
+        :return: (rpn_class_logits, rpn_bbox_deltas) where
+            rpn_class_logits: [batch, num_anchors, 2] or [batch, num_anchors] (depending on
+                `self.config.RPN_OBJECTNESS_FUNCTION`) RPN class logit predictions
+            rpn_bbox_deltas: [batch, num_anchors, 4] RPN box delta predictions
+        """
         # Get RPN proposals
-        rpn_feature_maps, rcnn_feature_maps, rpn_class_logits, _, rpn_bbox = self._feature_maps_and_proposals_all(
-            molded_images)
+        rpn_feature_maps, rcnn_feature_maps, rpn_class_logits, _, rpn_bbox_deltas = self._feature_maps_and_rpn_preds_all(
+            images)
 
-        return (rpn_class_logits, rpn_bbox)
+        return (rpn_class_logits, rpn_bbox_deltas)
 
 
     @alt_forward_method
-    def train_loss_forward(self, molded_images, rpn_target_match, rpn_target_bbox, rpn_num_pos):
+    def train_loss_forward(self, images, rpn_target_match, rpn_target_bbox, rpn_num_pos):
+        """
+        Training forward pass returning per-sample losses.
+
+        :param images: training images
+        :param rpn_target_match: [batch, anchors]. Anchor match type. 1=positive,
+                   -1=negative, 0=neutral anchor.
+        :param rpn_target_bbox: [batch, max positive anchors, (dy, dx, log(dh), log(dw))].
+            Uses 0 padding to fill in unsed bbox deltas.
+        :param rpn_num_pos: [batch] number of positives per sample
+
+        :return: (rpn_class_losses, rpn_bbox_losses) where
+            rpn_class_losses: [batch] RPN objectness per-sample loss
+            rpn_bbox_losses: [batch] RPN box delta per-sample loss
+        """
+
         # Convert rpn_num_pos to a list
-        if isinstance(rpn_num_pos, torch.Tensor):
-            rpn_num_pos = rpn_num_pos.cpu().numpy()
-        if isinstance(rpn_num_pos, np.ndarray):
-            rpn_num_pos = rpn_num_pos.tolist()
+        rpn_num_pos = torch_tensor_to_int_list(rpn_num_pos)
 
         # Get RPN proposals
-        rpn_feature_maps, rcnn_feature_maps, rpn_class_logits, _, rpn_bbox = self._feature_maps_and_proposals_all(
-            molded_images)
+        rpn_feature_maps, rcnn_feature_maps, rpn_class_logits, _, rpn_bbox = self._feature_maps_and_rpn_preds_all(
+            images)
 
         rpn_class_losses, rpn_bbox_losses = compute_rpn_losses_per_sample(self.config, rpn_class_logits, rpn_bbox,
                                                                           rpn_target_match, rpn_target_bbox,
@@ -1011,19 +1137,15 @@ class AbstractRPNNModel (RPNBaseModel):
         return (rpn_class_losses, rpn_bbox_losses)
 
 
-    @alt_forward_method
     def detect_forward(self, images):
-        """Runs the detection pipeline.
+        """Runs the detection pipeline and returns the results as torch tensors
 
-        images: Tensor of images
-        image_windows: tensor of image windows where each row is [y1, x1, y2, x2]
-        override_class: int or None; override class ID to always be this class
+        :param images: Tensor of images
 
-        Returns: [detection0, detection1, ... detectionN]
-        List of detections, one per sample, where each detection is a tuple of:
-        (rois, roi_scores) where:
-            rois: [1, detections, [y1, x1, y2, x2]]
-            roi_scores: [1, detections]
+        :return: (det_boxes, det_scores, n_rois_per_sample) where
+            rpn_rois: [batch, n_rois_after_nms, 4] detection boxes; dim 1 may be zero-padded
+            det_scores: [batch, n_rois_after_nms] detection confidence scores; dim 1 may be zero-padded
+            n_dets_per_sample: [batch] number of rois per sample in the batch
         """
         device = images.device
 
@@ -1032,12 +1154,27 @@ class AbstractRPNNModel (RPNBaseModel):
         h, w = image_size
         scale = torch.tensor([h, w, h, w], dtype=torch.float, device=device)
 
-        rpn_feature_maps, mrcnn_feature_maps, rpn_bbox_deltas, rpn_rois, roi_scores, n_rois_per_sample = self.rpn_detect_forward(
-            images)
+        _, _, _, det_boxes_nrm, det_scores, n_dets_per_sample = self.rpn_detect_forward(images)
 
-        rpn_rois = rpn_rois * scale[None, None, :]
+        det_boxes = det_boxes_nrm * scale[None, None, :]
 
-        rpn_rois_np = rpn_rois.cpu().numpy()
-        roi_scores_np = roi_scores.cpu().numpy()
+        return det_boxes, det_scores, n_dets_per_sample
 
-        return split_detections(n_rois_per_sample, rpn_rois_np, roi_scores_np)
+
+    def detect_forward_np(self, images):
+        """Runs the detection pipeline and returns the results as a list of detection tuples consisting of NumPy arrays
+
+        :param images: Tensor of images
+
+        :return: [detection0, detection1, ... detectionN] List of detections, one per sample, where each
+                detection is a tuple of:
+            (det_boxes, det_scores) where:
+            det_boxes: [1, detections, [y1, x1, y2, x2]] NumPy array
+            det_scores: [1, detections] NumPy array
+        """
+        det_boxes, det_scores, n_dets_per_sample = self.detect_forward(images)
+
+        det_boxes_np = det_boxes.cpu().numpy()
+        det_scores_np = det_scores.cpu().numpy()
+
+        return split_detections(n_dets_per_sample, det_boxes_np, det_scores_np)

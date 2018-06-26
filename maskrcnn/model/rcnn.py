@@ -16,6 +16,29 @@ from .rpn import RPNBaseModel, alt_forward_method
 
 
 class RCNNHead (nn.Module):
+    """R-CNN head model.
+
+    config: configuration object
+    depth: number of channels in hidden layers
+    pool_size: size of output extracted by ROI-align
+    num_classes: number of object classes
+    roi_canonical_scale: the natural size of objects detected at the canonical FPN pyramid level
+    roi_canonical_level: the index identifying the canonical FPN pyramid level
+    min_pyramid_level: the index of the lowest FPN pyramid level
+    max_pyramid_level: the index of the highest FPN pyramid level
+    roi_align_function: string identifying the ROI-align function used:
+        'crop_and_resize': crops the selected region and resizes to `pool_size` using bilinear interpolation
+        'border_aware_crop_and_resize': as 'crop_and_resize' except that the feature map pixels are assumed to have
+            their centres at '(y+0.5, x+0.5)', so the image extnds from (0,0) to (height, width)
+        'roi_align': ROIAlign from Detectron.pytorch
+    roi_align_sampling_ratio: sampling ratio for 'roi_align' function
+
+    Returns:
+        rcnn_class_logits: [batch, detection, cls] Predicted class logits
+        rcnn_class_probs: [batch, detection, cls] Predicted class probabilities
+        rcnn_bbox: [batch, detection, cls, (dy, dx, log(dh), log(dw))] Predicted bbox deltas
+    """
+
     def __init__(self, config, depth, pool_size, num_classes, roi_canonical_scale, roi_canonical_level,
                  min_pyramid_level, max_pyramid_level, roi_align_function, roi_align_sampling_ratio):
         super(RCNNHead, self).__init__()
@@ -73,10 +96,10 @@ class RCNNHead (nn.Module):
         rcnn_bbox_flat = rcnn_bbox_flat.view(rcnn_bbox_flat.size()[0], -1, 4)
 
         (rcnn_class_logits,) = unflatten_detections(n_rois_per_sample, rcnn_class_logits_flat)
-        (rcnn_probs,) = unflatten_detections(n_rois_per_sample, rcnn_probs_flat)
+        (rcnn_class_probs,) = unflatten_detections(n_rois_per_sample, rcnn_probs_flat)
         (rcnn_bbox,) = unflatten_detections(n_rois_per_sample, rcnn_bbox_flat)
 
-        return [rcnn_class_logits, rcnn_probs, rcnn_bbox]
+        return [rcnn_class_logits, rcnn_class_probs, rcnn_bbox]
 
     def detectron_weight_mapping(self):
         def convert_bbox_pred_w(shape, src_blobs):
@@ -111,7 +134,7 @@ class RCNNHead (nn.Module):
 
 
 ############################################################
-#  ROIAlign Layer
+#  Pyramid ROI align
 ############################################################
 
 def pyramid_roi_align(feature_maps, boxes, n_boxes_per_sample,
@@ -121,16 +144,24 @@ def pyramid_roi_align(feature_maps, boxes, n_boxes_per_sample,
     """Implements ROI Pooling on multiple levels of the feature pyramid.
 
     Inputs:
-    - feature_maps: List of feature maps from different levels of the pyramid.
+    :param feature_maps: List of feature maps from different levels of the pyramid.
                     Each is [batch, channels, height, width]
-    - boxes: [batch, num_boxes, (y1, x1, y2, x2)] in normalized
+    :param boxes: [batch, num_boxes, (y1, x1, y2, x2)] in normalized
              coordinates.
-    - n_boxes_per_sample: [n] where n is the number of boxes in each sample; the remainder
+    :param n_boxes_per_sample: [n] where n is the number of boxes in each sample; the remainder
             are assumed to be zero-padding
-    - pool_size: [height, width] of the output pooled regions. Usually [7, 7]
-    - image_shape: [height, width, channels]. Shape of input image in pixels
-    - roi_canonical_scale: canonical pyramid level scale
-    - roi_canonical_level: canonical pyramid level
+    :param pool_size: [height, width] of the output pooled regions. Usually [7, 7]
+    :param image_shape: [height, width, channels]. Shape of input image in pixels
+    :param roi_canonical_scale: the natural size of objects detected at the canonical FPN pyramid level
+    :param roi_canonical_level: the index identifying the canonical FPN pyramid level
+    :param min_pyramid_level: the index of the lowest FPN pyramid level
+    :param max_pyramid_level: the index of the highest FPN pyramid level
+    :param roi_align_function: string identifying the ROI-align function used:
+        'crop_and_resize': crops the selected region and resizes to `pool_size` using bilinear interpolation
+        'border_aware_crop_and_resize': as 'crop_and_resize' except that the feature map pixels are assumed to have
+            their centres at '(y+0.5, x+0.5)', so the image extnds from (0,0) to (height, width)
+        'roi_align': ROIAlign from Detectron.pytorch
+    :param roi_align_sampling_ratio: sampling ratio for 'roi_align' function
 
     Output:
     Pooled regions in the shape: [num_boxes_in_all_samples, height, width, channels].
@@ -209,11 +240,13 @@ def pyramid_roi_align(feature_maps, boxes, n_boxes_per_sample,
 
 
 ############################################################
-#  Detection Layer
+#  Detection refninement
 ############################################################
 
 def clip_to_window(window, boxes):
     """
+    Clip boxes to fit within window
+
         window: (y1, x1, y2, x2). The window in the image we want to clip to.
         boxes: [N, (y1, x1, y2, x2)]
     """
@@ -224,46 +257,47 @@ def clip_to_window(window, boxes):
 
     return boxes
 
-def refine_detections(rois, probs, deltas, window, config, image_size, min_confidence,
+def refine_detections(config, rois_nrm, pred_class_probs, pred_box_deltas, window, image_size, min_confidence,
                       override_class=None):
     """Refine classified proposals and filter overlaps and return final
     detections.
 
-    Inputs:
-        rois: [N, (y1, x1, y2, x2)] in normalized coordinates
-        probs: [N, num_classes]. Class probabilities.
-        deltas: [N, num_classes, (dy, dx, log(dh), log(dw))]. Class-specific
-                bounding box deltas.
-        window: (y1, x1, y2, x2) in image coordinates. The part of the image
+    :param config: configuration object
+    :param rois_nrm: [N, (y1, x1, y2, x2)] ROIs from RPN in normalized coordinates
+    :param pred_class_probs: [N, num_classes]. Class probability predictions from RCNN head
+    :param pred_box_deltas: [N, num_classes, (dy, dx, log(dh), log(dw))]. Class-specific
+                bounding box delta predictions from RCNN head
+    :param window: (y1, x1, y2, x2) in image coordinates. The part of the image
             that contains the image excluding the padding.
-        min_confidence: minimum confidence
-        override_class: int or None; override class ID to always be this class
+    :param image_size: the size of the image used to convert normalized co-ordinates to pixel co-ordinates
+    :param min_confidence: minimum confidence for detection to pass
+    :param override_class: int or None; override class ID to always be this class
 
-    Returns detections:
-        boxes: [N, (y1, x1, y2, x2)]
-        class_ids: [N]
-        scores: [N]
+    :return: (boxes, class_ids, scores) where:
+        boxes: [N, (y1, x1, y2, x2)] detection boxes
+        class_ids: [N] detection class IDs
+        scores: [N] detection confidence scores
     """
-    device = rois.device
+    device = rois_nrm.device
 
     # Class IDs per ROI
     if override_class:
-        class_ids = (torch.ones(probs.size()[0], dtype=torch.long, device=device) * override_class)
+        class_ids = (torch.ones(pred_class_probs.size()[0], dtype=torch.long, device=device) * override_class)
     else:
-        _, class_ids = torch.max(probs, dim=1)
+        _, class_ids = torch.max(pred_class_probs, dim=1)
 
     # Class probability of the top class of each ROI
     # Class-specific bounding box deltas
     idx = torch.arange(class_ids.size()[0], dtype=torch.long, device=device)
-    class_scores = probs[idx, class_ids]
-    deltas_specific = deltas[idx, class_ids]
+    class_scores = pred_class_probs[idx, class_ids]
+    deltas_specific = pred_box_deltas[idx, class_ids]
 
     # Apply bounding box deltas
     # Shape: [boxes, (y1, x1, y2, x2)] in normalized coordinates
     if config.RCNN_BBOX_USE_STD_DEV:
         std_dev = torch.tensor(np.reshape(config.BBOX_STD_DEV, [1, 4]), dtype=torch.float, device=device)
         deltas_specific = deltas_specific * std_dev
-    refined_rois = apply_box_deltas(rois, deltas_specific)
+    refined_rois = apply_box_deltas(rois_nrm, deltas_specific)
 
     # Convert coordinates to image domain
     height, width = image_size
@@ -333,33 +367,44 @@ def refine_detections(rois, probs, deltas, window, config, image_size, min_confi
         return refined_rois[keep], class_ids[keep], class_scores[keep]
 
 
-def detection_layer(config, rois, rcnn_class, rcnn_bbox, n_rois_per_sample, image_windows, image_size, min_confidence,
-                    override_class=None):
+def refine_detections_batch(config, rois_nrm, pred_class_probs, pred_box_deltas, n_rois_per_sample, image_windows,
+                            image_size, min_confidence, override_class=None):
     """Takes classified proposal boxes and their bounding box deltas and
     returns the final detection boxes.
+    Operates on a batch; the rois and predictions are sized such that dim 1 of the tensors are sizes to that of the
+    maximum number of rois from the RPN. They are zero-padded for samples that have less ROIs
 
-    rois: [batch, n_rois, 4]
-    rcnn_class: [batch, n_rois, n_classes]
-    rcnn_bbox: [batch, n_rois, n_classes, 4]
-    override_class: int or None; override class ID to always be this class
+    :param config: configuration object
+    :param rois_nrm: [batch, N, (y1, x1, y2, x2)] ROIs from RPN in normalized coordinates
+    :param pred_class_probs: [batch, N, num_classes]. Class probability predictions from RCNN head
+    :param pred_box_deltas: [batch, N, num_classes, (dy, dx, log(dh), log(dw))]. Class-specific
+                bounding box delta predictions from RCNN head
+    :param n_rois_per_sample: [batch]. Number of ROIs per sample
+    :param image_windows: [N, (y1, x1, y2, x2)] in image coordinates. The part of the images
+            that contain the image excluding the padding.
+    :param image_size: the size of the image used to convert normalized co-ordinates to pixel co-ordinates
+    :param min_confidence: minimum confidence for detection to pass
+    :param override_class: int or None; override class ID to always be this class
 
-    Returns:
-        (det_boxes, det_class_ids, det_scores, n_dets_per_sample) where
-            det_boxes: [batch, num_detections, (y1, x1, y2, x2)] (pixel co-ordinates)
-            det_class_ids: [batch, num_detections]
-            det_scores: [batch, num_detections]
-            n_dets_per_sample: [batch]
+    :return: (det_boxes, det_class_ids, det_scores, n_dets_per_sample) where
+        det_boxes: [batch, num_detections, (y1, x1, y2, x2)] (pixel co-ordinates)
+        det_class_ids: [batch, num_detections]
+        det_scores: [batch, num_detections]
+        n_dets_per_sample: [batch]
     """
-    device = rcnn_bbox.device
+    device = pred_box_deltas.device
 
     det_boxes = []
     det_class_ids = []
     det_scores = []
     n_detections_total = 0
     for sample_i, n_rois in enumerate(n_rois_per_sample):
-        sample_det_boxes, sample_det_class_ids, sample_det_scores = refine_detections(
-            rois[sample_i, :n_rois], rcnn_class[sample_i, :n_rois], rcnn_bbox[sample_i, :n_rois],
-            image_windows[sample_i], config, image_size, min_confidence, override_class=override_class)
+        sample_det_boxes, sample_det_class_ids, sample_det_scores = refine_detections(config, rois_nrm[sample_i, :n_rois],
+                                                                                      pred_class_probs[sample_i, :n_rois],
+                                                                                      pred_box_deltas[sample_i, :n_rois],
+                                                                                      image_windows[sample_i],
+                                                                                      image_size, min_confidence,
+                                                                                      override_class=override_class)
         if sample_det_boxes is None:
             sample_det_boxes = torch.zeros([0], dtype=torch.float, device=device)
             sample_det_class_ids = torch.zeros([0], dtype=torch.long, device=device)
@@ -390,11 +435,11 @@ def detection_layer(config, rois, rcnn_class, rcnn_bbox, n_rois_per_sample, imag
 ############################################################
 
 def compute_rcnn_class_loss(target_class_ids, pred_class_logits):
-    """Loss for the classifier head of Mask RCNN.
+    """Loss for the classifier head of R-CNN.
 
-    target_class_ids: [num_rois]. Integer class IDs. Uses zero
-        padding to fill in the array.
-    pred_class_logits: [num_rois, num_classes]
+    :param target_class_ids: [num_rois]. Target class IDs. Uses zero padding to fill in the array.
+    :param pred_class_logits: [num_rois, num_classes] Predicted class logits
+    :return: loss as a torch scalar
     """
 
     # Loss
@@ -407,14 +452,15 @@ def compute_rcnn_class_loss(target_class_ids, pred_class_logits):
     return loss
 
 
-def compute_rcnn_bbox_loss(target_bbox, target_class_ids, pred_bbox):
-    """Loss for Mask R-CNN bounding box refinement.
+def compute_rcnn_bbox_loss(target_bbox_deltas, target_class_ids, pred_bbox_deltas):
+    """Loss for R-CNN bounding box refinement.
 
-    target_bbox: [num_rois, (dy, dx, log(dh), log(dw))]
-    target_class_ids: [num_rois]. Integer class IDs.
-    pred_bbox: [num_rois, num_classes, (dy, dx, log(dh), log(dw))]
+    :param target_bbox_deltas: [num_rois, (dy, dx, log(dh), log(dw))] target box deltas
+    :param target_class_ids: [num_rois]. Target class IDs.
+    :param pred_bbox_deltas: [num_rois, num_classes, (dy, dx, log(dh), log(dw))] predicted bbox deltas
+    :return: loss as a torch scalar
     """
-    device = pred_bbox.device
+    device = pred_bbox_deltas.device
 
     if not_empty(target_class_ids):
         # Only positive ROIs contribute to the loss. And only
@@ -424,11 +470,11 @@ def compute_rcnn_bbox_loss(target_bbox, target_class_ids, pred_bbox):
         indices = torch.stack((positive_roi_ix,positive_roi_class_ids), dim=1)
 
         # Gather the deltas (predicted and true) that contribute to loss
-        target_bbox = target_bbox[indices[:,0],:]
-        pred_bbox = pred_bbox[indices[:,0],indices[:,1],:]
+        target_bbox_deltas = target_bbox_deltas[indices[:, 0], :]
+        pred_bbox_deltas = pred_bbox_deltas[indices[:, 0], indices[:, 1], :]
 
         # Smooth L1 loss
-        loss = F.smooth_l1_loss(pred_bbox, target_bbox)
+        loss = F.smooth_l1_loss(pred_bbox_deltas, target_bbox_deltas)
     else:
         loss = torch.tensor([0], dtype=torch.float, device=device)
 
@@ -439,31 +485,63 @@ def compute_rcnn_bbox_loss(target_bbox, target_class_ids, pred_bbox):
 
 
 def compute_faster_rcnn_losses(config, rpn_pred_class_logits, rpn_pred_bbox, rpn_target_match, rpn_target_bbox,
-                               rpn_target_num_pos_per_sample, rcnn_pred_class_logits, rcnn_pred_bbox,
+                               rpn_target_num_pos_per_sample, rcnn_pred_class_logits, rcnn_pred_bbox_deltas,
                                rcnn_target_class_ids, rcnn_target_deltas):
+    """Loss for R-CNN network
+
+    Combines the RPN and R-CNN losses.
+
+    The RPN predictions and targets retain their batch/anchor shape.
+    The RCNN predictions and targets should be flattened from [batch, detection] into [batch & detection].
+    This is done by the `train_forward` method, so these two fit together.
+
+    :param config: configuration object
+    :param rpn_pred_class_logits: [batch, anchors, 2] RPN classifier logits for FG/BG if using softmax or focal loss for
+        RPN class (see config.RPN_OBJECTNESS_FUNCTION),
+        [batch, anchors] RPN classifier FG logits if using sigmoid.
+    :param rpn_pred_bbox: [batch, anchors, (dy, dx, log(dh), log(dw))]
+    :param rpn_target_match: [batch, anchors]. Anchor match type. 1=positive,
+               -1=negative, 0=neutral anchor.
+    :param rpn_target_bbox: [batch, max positive anchors, (dy, dx, log(dh), log(dw))].
+        Uses 0 padding to fill in unsed bbox deltas.
+    :param rpn_target_num_pos_per_sample: [batch] number of positives per sample
+
+    :param rcnn_pred_class_logits: [num_rois, num_classes] Predicted class logits
+    :param rcnn_pred_bbox_deltas: [num_rois, num_classes, (dy, dx, log(dh), log(dw))] predicted bbox deltas
+    :param rcnn_target_class_ids: [num_rois]. Target class IDs. Uses zero padding to fill in the array.
+    :param rcnn_target_deltas: [num_rois, (dy, dx, log(dh), log(dw))] target box deltas
+
+    :return: (rpn_class_loss, rpn_bbox_loss, rcnn_class_loss, rcnn_bbox_loss)
+        rpn_class_loss: RPN objectness loss as a torch scalar
+        rpn_bbox_loss: RPN box loss as a torch scalar
+        rcnn_class_loss: RCNN classification loss as a torch scalar
+        rcnn_bbox_loss: RCNN bbox loss as a torch scalar
+    """
     rpn_target_num_pos_per_sample = torch_tensor_to_int_list(rpn_target_num_pos_per_sample)
     rpn_class_loss, rpn_bbox_loss = compute_rpn_losses(config, rpn_pred_class_logits, rpn_pred_bbox, rpn_target_match,
                                                        rpn_target_bbox, rpn_target_num_pos_per_sample)
 
     rcnn_class_loss = compute_rcnn_class_loss(rcnn_target_class_ids, rcnn_pred_class_logits)
-    rcnn_bbox_loss = compute_rcnn_bbox_loss(rcnn_target_deltas, rcnn_target_class_ids, rcnn_pred_bbox)
+    rcnn_bbox_loss = compute_rcnn_bbox_loss(rcnn_target_deltas, rcnn_target_class_ids, rcnn_pred_bbox_deltas)
 
-    return [rpn_class_loss, rpn_bbox_loss, rcnn_class_loss, rcnn_bbox_loss]
+    return (rpn_class_loss, rpn_bbox_loss, rcnn_class_loss, rcnn_bbox_loss)
 
 
 
 ############################################################
-#  Detection Target Layer
+#  Detection target generation
 ############################################################
 
 def bbox_overlaps(boxes1, boxes2):
     """Computes IoU overlaps between two sets of boxes.
-    boxes1, boxes2: [N, (y1, x1, y2, x2)].
+
+    :param boxes1: boxes as a [N, (y1, x1, y2, x2)] tensor
+    :param boxes2: boxes as a [M, (y1, x1, y2, x2)] tensor
+
+    :return: IoU overlaps as a [N, M] tensor
     """
     # 1. Tile boxes2 and repeate boxes1. This allows us to compare
     # every boxes1 against every boxes2 without loops.
-    # TF doesn't have an equivalent to np.repeate() so simulate it
-    # using tf.tile() and tf.reshape.
     device = boxes1.device
 
     boxes1_repeat = boxes2.size()[0]
@@ -494,38 +572,40 @@ def bbox_overlaps(boxes1, boxes2):
 
 
 
-def rcnn_detection_target_one_sample(proposals, prop_class_logits, prop_class, prop_bbox_deltas, gt_class_ids, gt_boxes, config,
-                                     hard_negative_mining=False):
-    """Subsamples proposals and generates target box refinement and class_ids.
+def rcnn_detection_target_one_sample(config, proposals_nrm, prop_class_logits, prop_class, prop_bbox_deltas, gt_class_ids,
+                                     gt_boxes_nrm, hard_negative_mining=False):
+    """Subsamples proposals and matches them with ground truth boxes, generating target box refinement and
+    class_ids.
 
     Works on a single sample.
 
     If hard_negative_mining is True, values must be provided for prop_class_logits, prop_class and prop_bbox_deltas,
     otherwise they are optional.
 
-    Inputs:
-    proposals: [N, (y1, x1, y2, x2)] in normalized coordinates.
-    prop_class_logits: (optional) [N, N_CLASSES] predicted class logits for each proposal.
-    prop_class: (optional) [N, N_CLASSES] predicted class probabilities for each proposal.
-    prop_bbox_deltas: (optional) [N, N_CLASSES, 4] predicted bbox deltas for each proposal.
-    gt_class_ids: [N_GT] Integer class IDs.
-    gt_boxes: [N_GT, (y1, x1, y2, x2)] in normalized
-              coordinates.
-    hard_negative_mining: bool; if True, use hard negative mining to choose target boxes
+    :param config: configuration object
+    :param proposals_nrm: [N, (y1, x1, y2, x2)] in normalized coordinates.
+    :param prop_class_logits: (optional) [N, N_CLASSES] predicted RCNN class logits for each proposal (used
+        when hard negative mining is enabled).
+    :param prop_class: (optional) [N, N_CLASSES] predicted RCNN class probabilities for each proposal (used
+        when hard negative mining is enabled).
+    :param prop_bbox_deltas: (optional) [N, N_CLASSES, 4] predicted RCNN bbox deltas for each proposal (used
+        when hard negative mining is enabled).
+    :param gt_class_ids: [N_GT] Ground truth class IDs.
+    :param gt_boxes_nrm: [N_GT, (y1, x1, y2, x2)] Ground truth boxes in normalized coordinates.
+    :param hard_negative_mining: bool; if True, use hard negative mining to choose target boxes
 
-    Returns: Target ROIs and corresponding class IDs, bounding box shifts,
-    and masks.
-    rois: [RCNN_TRAIN_ROIS_PER_IMAGE, (y1, x1, y2, x2)] in normalized
-          coordinates
-    roi_class_logits: [RCNN_TRAIN_ROIS_PER_IMAGE, N_CLASSES] predicted class logits of selected proposals
-    roi_class_probs: [RCNN_TRAIN_ROIS_PER_IMAGE, N_CLASSES] predicted class probabilities of selected proposals
-    roi_bbox_deltas: [RCNN_TRAIN_ROIS_PER_IMAGE, N_CLASSES, 4] predicted bbox deltas of selected proposals.
-    target_class_ids: [RCNN_TRAIN_ROIS_PER_IMAGE]. Integer class IDs.
-    target_deltas: [RCNN_TRAIN_ROIS_PER_IMAGE, NUM_CLASSES,
-                    (dy, dx, log(dh), log(dw), class_id)]
-                   Class-specific bbox refinments.
+    :return: (rois_nrm, roi_class_logits, roi_class_probs, roi_bbox_deltas, target_class_ids, target_deltas)
+            Target ROIs and corresponding class IDs, bounding box shifts, where:
+        rois_nrm: [RCNN_TRAIN_ROIS_PER_IMAGE, (y1, x1, y2, x2)] proposals selected for training, in normalized coordinates
+        roi_class_logits: [RCNN_TRAIN_ROIS_PER_IMAGE, N_CLASSES] predicted class logits of selected proposals
+        roi_class_probs: [RCNN_TRAIN_ROIS_PER_IMAGE, N_CLASSES] predicted class probabilities of selected proposals
+        roi_bbox_deltas: [RCNN_TRAIN_ROIS_PER_IMAGE, N_CLASSES, 4] predicted bbox deltas of selected proposals.
+        target_class_ids: [RCNN_TRAIN_ROIS_PER_IMAGE]. Integer class IDs.
+        target_deltas: [RCNN_TRAIN_ROIS_PER_IMAGE, NUM_CLASSES,
+                        (dy, dx, log(dh), log(dw), class_id)]
+                       Class-specific bbox refinments.
     """
-    device = proposals.device
+    device = proposals_nrm.device
 
     if hard_negative_mining:
         if prop_class_logits is None:
@@ -551,19 +631,19 @@ def rcnn_detection_target_one_sample(proposals, prop_class_logits, prop_class, p
     if not_empty(torch.nonzero(gt_class_ids < 0)):
         crowd_ix = torch.nonzero(gt_class_ids < 0)[:, 0]
         non_crowd_ix = torch.nonzero(gt_class_ids > 0)[:, 0]
-        crowd_boxes = gt_boxes[crowd_ix, :]
+        crowd_boxes = gt_boxes_nrm[crowd_ix, :]
         gt_class_ids = gt_class_ids[non_crowd_ix]
-        gt_boxes = gt_boxes[non_crowd_ix, :]
+        gt_boxes_nrm = gt_boxes_nrm[non_crowd_ix, :]
 
         # Compute overlaps with crowd boxes [anchors, crowds]
-        crowd_overlaps = bbox_overlaps(proposals, crowd_boxes)
+        crowd_overlaps = bbox_overlaps(proposals_nrm, crowd_boxes)
         crowd_iou_max = torch.max(crowd_overlaps, dim=1)[0]
         no_crowd_bool = crowd_iou_max < 0.001
     else:
-        no_crowd_bool = torch.tensor([True] * proposals.size()[0], dtype=torch.uint8, device=device)
+        no_crowd_bool = torch.tensor([True] * proposals_nrm.size()[0], dtype=torch.uint8, device=device)
 
     # Compute overlaps matrix [proposals, gt_boxes]
-    overlaps = bbox_overlaps(proposals, gt_boxes)
+    overlaps = bbox_overlaps(proposals_nrm, gt_boxes_nrm)
 
     # Determine postive and negative ROIs
     roi_iou_max = torch.max(overlaps, dim=1)[0]
@@ -598,7 +678,7 @@ def rcnn_detection_target_one_sample(proposals, prop_class_logits, prop_class, p
             positive_indices = positive_indices[rand_idx]
 
         positive_count = positive_indices.size()[0]
-        positive_rois = proposals[positive_indices,:]
+        positive_rois = proposals_nrm[positive_indices, :]
         if has_rcnn_predictions:
             positive_class_logits = prop_class_logits[positive_indices,:]
             positive_class_probs = prop_class[positive_indices,:]
@@ -609,7 +689,7 @@ def rcnn_detection_target_one_sample(proposals, prop_class_logits, prop_class, p
         # Assign positive ROIs to GT boxes.
         positive_overlaps = overlaps[positive_indices,:]
         roi_gt_box_assignment = torch.max(positive_overlaps, dim=1)[1]
-        roi_gt_boxes = gt_boxes[roi_gt_box_assignment,:]
+        roi_gt_boxes = gt_boxes_nrm[roi_gt_box_assignment, :]
         roi_gt_class_ids = gt_class_ids[roi_gt_box_assignment]
 
         # Compute bbox refinement for positive ROIs
@@ -642,7 +722,7 @@ def rcnn_detection_target_one_sample(proposals, prop_class_logits, prop_class, p
             negative_indices = negative_indices[rand_idx]
 
         negative_count = negative_indices.size()[0]
-        negative_rois = proposals[negative_indices, :]
+        negative_rois = proposals_nrm[negative_indices, :]
         if has_rcnn_predictions:
             negative_class_logits = prop_class_logits[negative_indices,:]
             negative_class_probs = prop_class[negative_indices,:]
@@ -694,8 +774,9 @@ def rcnn_detection_target_one_sample(proposals, prop_class_logits, prop_class, p
     return rois, roi_class_logits, roi_class_probs, roi_bbox_deltas, roi_gt_class_ids, deltas
 
 
-def rcnn_detection_target_layer(proposals, prop_class_logits, prop_class, prop_bbox_deltas, n_proposals_per_sample,
-                                gt_class_ids, gt_boxes, n_gts_per_sample, config, hard_negative_mining):
+def rcnn_detection_target_batch(config, proposals_nrm, prop_class_logits, prop_class, prop_bbox_deltas,
+                                n_proposals_per_sample, gt_class_ids, gt_boxes_nrm, n_gts_per_sample,
+                                hard_negative_mining):
     """Subsamples proposals and generates target box refinement and class_ids for each.
 
     Works on a mini-batch of samples.
@@ -703,31 +784,37 @@ def rcnn_detection_target_layer(proposals, prop_class_logits, prop_class, prop_b
     If hard_negative_mining is True, values must be provided for prop_class_logits, prop_class and prop_bbox_deltas,
     otherwise they are optional.
 
-    Inputs:
-    proposals: [batch, N, (y1, x1, y2, x2)] in normalized coordinates. Might
-               be zero padded if there are not enough proposals.
-    prop_class_logits: [batch, N, N_CLASSES] predicted class logits for each proposal. Might
-               be zero padded if there are not enough proposals.
-    prop_class: [batch, N, N_CLASSES] predicted class probabilities for each proposal. Might
-               be zero padded if there are not enough proposals.
-    prop_bbox_deltas: [batch, N, N_CLASSES, 4] predicted bbox deltas for each proposal. Might
-               be zero padded if there are not enough proposals.
-    gt_class_ids: [batch, N_GT] Integer class IDs.
-    gt_boxes: [batch, N_GT, (y1, x1, y2, x2)] in normalized
-              coordinates.
-    hard_negative_mining: bool; if True, use hard negative mining to choose target boxes
+    :param config: configuration object
+    :param proposals_nrm: [batch, N, (y1, x1, y2, x2)] in normalized coordinates. Dim 1 will
+            be zero padded if there are not enough proposals.
+    :param prop_class_logits: [batch, N, N_CLASSES] predicted class logits for each proposal. Dim 1 will
+            be zero padded if there are not enough proposals. Used when hard negative mining is enabled.
+    :param prop_class: [batch, N, N_CLASSES] predicted class probabilities for each proposal. Dim 1 will
+            be zero padded if there are not enough proposals. Used when hard negative mining is enabled.
+    :param prop_bbox_deltas: [batch, N, N_CLASSES, 4] predicted bbox deltas for each proposal. Dim 1 will
+            be zero padded if there are not enough proposals. Used when hard negative mining is enabled.
+    :param n_proposals_per_sample: number of proposals per sample; specifies the number of proposals in each
+            sample and therefore the amount of zero padding
+    :param gt_class_ids: [batch, N_GT] Ground truth class IDs. Dim 1 will be zero padded if there are not
+            enough GTs
+    :param gt_boxes_nrm: [batch, N_GT, (y1, x1, y2, x2)] in normalized coordinates. Dim 1 will be zero padded
+            if there are not enough GTs
+    :param n_gts_per_sample: number of ground truths per sample; specifies the number of ground truths in each
+            sample and therefore the amount of zero padding
+    :param hard_negative_mining: bool; if True, use hard negative mining to choose target boxes
 
-    Returns: Target ROIs and corresponding class IDs, bounding box shifts,
-    and masks.
-    rois: [batch, RCNN_TRAIN_ROIS_PER_IMAGE, (y1, x1, y2, x2)] in normalized
-          coordinates
-    roi_class_logits: [batch, RCNN_TRAIN_ROIS_PER_IMAGE, N_CLASSES] predicted class logits of selected proposals
-    roi_class_probs: [batch, RCNN_TRAIN_ROIS_PER_IMAGE, N_CLASSES] predicted class probabilities of selected proposals
-    roi_bbox_deltas: [batch, RCNN_TRAIN_ROIS_PER_IMAGE, N_CLASSES, 4] predicted bbox deltas of selected proposals.
-    target_class_ids: [batch, RCNN_TRAIN_ROIS_PER_IMAGE]. Integer class IDs.
-    target_deltas: [batch, RCNN_TRAIN_ROIS_PER_IMAGE, NUM_CLASSES,
-                    (dy, dx, log(dh), log(dw), class_id)]
-                   Class-specific bbox refinments.
+    :return: (rois_nrm, roi_class_logits, roi_class_probs, roi_bbox_deltas, target_class_ids, target_deltas,
+              n_targets_per_sample)
+            Target ROIs and corresponding class IDs, bounding box shifts, where:
+        rois_nrm: [batch, RCNN_TRAIN_ROIS_PER_IMAGE, (y1, x1, y2, x2)] proposals selected for training, in normalized coordinates
+        roi_class_logits: [batch, RCNN_TRAIN_ROIS_PER_IMAGE, N_CLASSES] predicted class logits of selected proposals
+        roi_class_probs: [batch, RCNN_TRAIN_ROIS_PER_IMAGE, N_CLASSES] predicted class probabilities of selected proposals
+        roi_bbox_deltas: [batch, RCNN_TRAIN_ROIS_PER_IMAGE, N_CLASSES, 4] predicted bbox deltas of selected proposals.
+        target_class_ids: [batch, RCNN_TRAIN_ROIS_PER_IMAGE]. Integer class IDs.
+        target_deltas: [batch, RCNN_TRAIN_ROIS_PER_IMAGE, NUM_CLASSES,
+                        (dy, dx, log(dh), log(dw), class_id)]
+                       Class-specific bbox refinments.
+        n_targets_per_sample: number of targets per sample
     """
     if hard_negative_mining:
         if prop_class_logits is None:
@@ -764,10 +851,17 @@ def rcnn_detection_target_layer(proposals, prop_class_logits, prop_class, prop_b
             else:
                 sample_prop_class_logits = sample_prop_class = sample_prop_bbox_deltas = None
             sample_rois, sample_roi_class_logits, sample_roi_class_probs, sample_roi_bbox_deltas, \
-                    sample_roi_gt_class_ids, sample_deltas = rcnn_detection_target_one_sample(
-                proposals[sample_i, :n_props], sample_prop_class_logits,
-                sample_prop_class, sample_prop_bbox_deltas,
-                gt_class_ids[sample_i, :n_gts], gt_boxes[sample_i, :n_gts], config, hard_negative_mining)
+                    sample_roi_gt_class_ids, sample_deltas = rcnn_detection_target_one_sample(config,
+                                                                                              proposals_nrm[sample_i,
+                                                                                              :n_props],
+                                                                                              sample_prop_class_logits,
+                                                                                              sample_prop_class,
+                                                                                              sample_prop_bbox_deltas,
+                                                                                              gt_class_ids[sample_i,
+                                                                                              :n_gts],
+                                                                                              gt_boxes_nrm[sample_i,
+                                                                                              :n_gts],
+                                                                                              hard_negative_mining)
             if not_empty(sample_rois):
                 sample_rois = sample_rois.unsqueeze(0)
                 if has_rcnn_predictions:
@@ -777,13 +871,13 @@ def rcnn_detection_target_layer(proposals, prop_class_logits, prop_class, prop_b
                 sample_roi_gt_class_ids = sample_roi_gt_class_ids.unsqueeze(0)
                 sample_deltas = sample_deltas.unsqueeze(0)
         else:
-            sample_rois = proposals.new()
+            sample_rois = proposals_nrm.new()
             if has_rcnn_predictions:
-                sample_roi_class_logits = proposals.new()
-                sample_roi_class_probs = proposals.new()
-                sample_roi_bbox_deltas = proposals.new()
+                sample_roi_class_logits = proposals_nrm.new()
+                sample_roi_class_probs = proposals_nrm.new()
+                sample_roi_bbox_deltas = proposals_nrm.new()
             sample_roi_gt_class_ids = gt_class_ids.new()
-            sample_deltas = proposals.new()
+            sample_deltas = proposals_nrm.new()
         rois.append(sample_rois)
         if has_rcnn_predictions:
             roi_class_logits.append(sample_roi_class_logits)
@@ -837,27 +931,33 @@ class FasterRCNNBaseModel (RPNBaseModel):
                                    config.ROI_ALIGN_FUNCTION, config.ROI_ALIGN_SAMPLING_RATIO)
 
 
-    def rcnn_detect_forward(self, images, image_windows, rcnn_feature_maps, rpn_rois, n_rois_per_sample,
+    def rcnn_detect_forward(self, image_size, image_windows, rcnn_feature_maps, rpn_rois_nrm, n_rois_per_sample,
                             override_class=None):
         """
-        Runs the RCNN
-        :param images:
-        :param image_windows:
-        :param rcnn_feature_maps:
-        :param rpn_rois:
-        :param n_rois_per_sample:
-        :param override_class:
-        :return:
-        """
-        image_size = images.shape[2:]
+        Runs the RCNN part of the detection pipeline.
 
+        :param image_size: image shape as a (height, width) tuple
+        :param image_windows: [N, (y1, x1, y2, x2)] in image coordinates. The part of the images
+                that contain the image excluding the padding.
+        :param rcnn_feature_maps: per-FPN level feature maps for RCNN;
+                list of [batch, feat_chn, lvl_height, lvl_width] tensors
+        :param rpn_rois_nrm: [batch, N, (y1, x1, y2, x2)] ROIs from RPN in normalized coordinates
+        :param n_rois_per_sample: number of ROIs per sample from RPN
+        :param override_class: int or None; override class ID to always be this class
+
+        :return: (det_boxes, det_class_ids, det_scores, n_dets_per_sample) where
+            det_boxes: [batch, num_detections, (y1, x1, y2, x2)] (pixel co-ordinates)
+            det_class_ids: [batch, num_detections]
+            det_scores: [batch, num_detections]
+            n_dets_per_sample: [batch]
+        """
         # Network Heads
         # Proposal classifier and BBox regressor heads
-        if rpn_rois.size()[1] > self.config.DETECTION_BLOCK_SIZE_INFERENCE:
+        if rpn_rois_nrm.size()[1] > self.config.DETECTION_BLOCK_SIZE_INFERENCE:
             rcnn_class = []
             rcnn_bbox = []
-            for block_i in range(0, rpn_rois.size()[1], self.config.DETECTION_BLOCK_SIZE_INFERENCE):
-                block_j = min(block_i + self.config.DETECTION_BLOCK_SIZE_INFERENCE, rpn_rois.size()[1])
+            for block_i in range(0, rpn_rois_nrm.size()[1], self.config.DETECTION_BLOCK_SIZE_INFERENCE):
+                block_j = min(block_i + self.config.DETECTION_BLOCK_SIZE_INFERENCE, rpn_rois_nrm.size()[1])
 
                 # Get the number of ROIs per sample for this block
                 n_rois_per_sample_block = [
@@ -865,7 +965,7 @@ class FasterRCNNBaseModel (RPNBaseModel):
                 ]
 
                 _, rcnn_class_block, rcnn_bbox_block = self.classifier(
-                    rcnn_feature_maps, rpn_rois[:, block_i:block_j, ...], n_rois_per_sample_block, image_size)
+                    rcnn_feature_maps, rpn_rois_nrm[:, block_i:block_j, ...], n_rois_per_sample_block, image_size)
 
                 rcnn_class.append(rcnn_class_block)
                 rcnn_bbox.append(rcnn_bbox_block)
@@ -875,14 +975,14 @@ class FasterRCNNBaseModel (RPNBaseModel):
 
         else:
             _, rcnn_class, rcnn_bbox = self.classifier(
-                rcnn_feature_maps, rpn_rois, n_rois_per_sample, image_size)
+                rcnn_feature_maps, rpn_rois_nrm, n_rois_per_sample, image_size)
 
         # Detections
         # det_boxes: [batch, num_detections, (y1, x1, y2, x2)] in image coordinates
         # det_class_ids: [batch, num_detections]
         # det_scores: [batch, num_detections]
-        det_boxes, det_class_ids, det_scores, n_dets_per_sample = detection_layer(
-            self.config, rpn_rois, rcnn_class, rcnn_bbox, n_rois_per_sample, image_windows, image_size,
+        det_boxes, det_class_ids, det_scores, n_dets_per_sample = refine_detections_batch(
+            self.config, rpn_rois_nrm, rcnn_class, rcnn_bbox, n_rois_per_sample, image_windows, image_size,
             min_confidence=self.config.RCNN_DETECTION_MIN_CONFIDENCE, override_class=override_class)
 
         return det_boxes, det_class_ids, det_scores, n_dets_per_sample
@@ -896,30 +996,29 @@ class AbstractFasterRCNNModel (FasterRCNNBaseModel):
 
     Adds training and detection forward passes to FasterRCNNBaseModel
     """
-    def _train_forward(self, molded_images, gt_class_ids, gt_boxes, n_gts_per_sample, hard_negative_mining=False):
+    def _train_forward(self, images, gt_class_ids, gt_boxes, n_gts_per_sample, hard_negative_mining=False):
         """Supervised forward training pass helper
 
-        molded_images: Tensor of images
-        gt_class_ids: ground truth detection classes [batch, detection]
-        gt_boxes: ground truth detection boxes [batch, detection, [y1, x1, y2, x2]
-        n_gts_per_sample: number of ground truth detections per sample [batch]
-        hard_negative_mining: if True, use hard negative mining to choose samples for training R-CNN head
+        :param images: Tensor of images
+        :param gt_class_ids: ground truth box classes [batch, detection]
+        :param gt_boxes: ground truth boxes [batch, detection, [y1, x1, y2, x2]
+        :param n_gts_per_sample: number of ground truth detections per sample [batch]
+        :param hard_negative_mining: if True, use hard negative mining to choose samples for training R-CNN head
 
-        Returns:
-            (rpn_class_logits, rpn_bbox, target_class_ids, rcnn_class_logits,
-                    target_deltas, rcnn_bbox, n_targets_per_sample) where
-                rpn_class_logits: [batch, anchor]; predicted class logits from RPN
-                rpn_bbox: [batch, anchor, 4]; predicted bounding box deltas
-                target_class_ids: [batch, ROI]; RCNN target class IDs
-                rcnn_class_logits: [batch, ROI, cls]; RCNN predicted class logits
-                target_deltas: [batch, ROI, 4]; RCNN target box deltas
-                rcnn_bbox: [batch, ROI, cls, 4]; RCNN predicted box deltas
-                n_targets_per_sample: [batch] the number of target ROIs in each sample
+        :return: (rpn_class_logits, rpn_bbox_deltas, rcnn_target_class_ids, rcnn_pred_logits,
+                  rcnn_target_deltas, rcnn_pred_deltas, n_targets_per_sample) where:
+            rpn_class_logits: [batch, anchor]; predicted class logits from RPN
+            rpn_bbox_deltas: [batch, anchor, 4]; predicted bounding box deltas
+            rcnn_target_class_ids: [batch, ROI]; RCNN target class IDs
+            rcnn_pred_logits: [batch, ROI, cls]; RCNN predicted class logits
+            rcnn_target_deltas: [batch, ROI, 4]; RCNN target box deltas
+            rcnn_pred_deltas: [batch, ROI, cls, 4]; RCNN predicted box deltas
+            n_targets_per_sample: [batch] the number of target ROIs in each sample
         """
-        device = molded_images.device
+        device = images.device
 
         # Get image size
-        image_size = molded_images.size()[2:]
+        image_size = images.size()[2:]
 
         # Compute scale factor for converting normalized co-ordinates to pixel co-ordinates
         h, w = image_size
@@ -930,7 +1029,7 @@ class AbstractFasterRCNNModel (FasterRCNNBaseModel):
         nms_threshold =  self.config.RPN_NMS_THRESHOLD
         proposal_count = self.config.RPN_POST_NMS_ROIS_TRAINING
         rpn_feature_maps, rcnn_feature_maps, rpn_class_logits, rpn_bbox, rpn_rois, _, n_rois_per_sample = \
-            self._feature_maps_proposals_and_roi(molded_images, pre_nms_limit, nms_threshold, proposal_count)
+            self._feature_maps_rpn_preds_and_roi(images, pre_nms_limit, nms_threshold, proposal_count)
 
         # Normalize coordinates
         gt_boxes_nrm = gt_boxes / scale
@@ -948,18 +1047,17 @@ class AbstractFasterRCNNModel (FasterRCNNBaseModel):
             # Note that proposal class IDs, gt_boxes, and gt_masks are zero
             # padded. Equally, returned rois and targets are zero padded.
             rois, rcnn_class_logits, rcnn_class, rcnn_bbox, target_class_ids, target_deltas, n_targets_per_sample = \
-                rcnn_detection_target_layer(
-                    rpn_rois, roi_class_logits, roi_class, roi_bbox, n_rois_per_sample,
-                    gt_class_ids, gt_boxes_nrm, n_gts_per_sample, self.config, hard_negative_mining)
+                rcnn_detection_target_batch(self.config, rpn_rois, roi_class_logits, roi_class, roi_bbox,
+                                            n_rois_per_sample, gt_class_ids, gt_boxes_nrm, n_gts_per_sample,
+                                            hard_negative_mining)
         else:
             # Generate detection targets
             # Subsamples proposals and generates target outputs for training
             # Note that proposal class IDs, gt_boxes, and gt_masks are zero
             # padded. Equally, returned rois and targets are zero padded.
             rois, _, _, _, target_class_ids, target_deltas, n_targets_per_sample = \
-                rcnn_detection_target_layer(
-                    rpn_rois, None, None, None, n_rois_per_sample,
-                    gt_class_ids, gt_boxes_nrm, n_gts_per_sample, self.config, hard_negative_mining)
+                rcnn_detection_target_batch(self.config, rpn_rois, None, None, None, n_rois_per_sample, gt_class_ids,
+                                            gt_boxes_nrm, n_gts_per_sample, hard_negative_mining)
 
             if max(n_targets_per_sample) > 0:
                 # Network Heads
@@ -975,44 +1073,62 @@ class AbstractFasterRCNNModel (FasterRCNNBaseModel):
                 target_deltas, rcnn_bbox, n_targets_per_sample)
 
 
-    @alt_forward_method
-    def train_forward(self, molded_images, gt_class_ids, gt_boxes, n_gts_per_sample, hard_negative_mining=False):
+    def train_forward(self, images, gt_class_ids, gt_boxes, n_gts_per_sample, hard_negative_mining=False):
         """Supervised forward training pass
 
-        molded_images: Tensor of images
-        gt_class_ids: ground truth detection classes [batch, detection]
-        gt_boxes: ground truth detection boxes [batch, detection, [y1, x1, y2, x2]
-        n_gts_per_sample: number of ground truth detections per sample [batch]
-        hard_negative_mining: if True, use hard negative mining to choose samples for training R-CNN head
+        :param images: Tensor of images
+        :param gt_class_ids: ground truth box classes [batch, detection]
+        :param gt_boxes: ground truth boxes [batch, detection, [y1, x1, y2, x2]
+        :param n_gts_per_sample: number of ground truth detections per sample [batch]
+        :param hard_negative_mining: if True, use hard negative mining to choose samples for training R-CNN head
 
-        Returns:
-            (rpn_class_logits, rpn_bbox, target_class_ids, rcnn_class_logits,
-                    target_deltas, rcnn_bbox, n_targets_per_sample) where
-                rpn_class_logits: [batch & ROI]; predicted class logits from RPN
-                rpn_bbox: [batch & ROI, 4]; predicted bounding box deltas
-                target_class_ids: [batch & TGT]; RCNN target class IDs
-                rcnn_class_logits: [batch & TGT, cls]; RCNN predicted class logits
-                target_deltas: [batch & TGT, 4]; RCNN target box deltas
-                rcnn_bbox: [batch & TGT, cls, 4]; RCNN predicted box deltas
-                n_targets_per_sample: [batch] the number of targets in each sample
+        :return: (rpn_class_logits, rpn_bbox_deltas, rcnn_target_class_ids, rcnn_pred_logits,
+                  rcnn_target_deltas, rcnn_pred_deltas, n_targets_per_sample) where:
+            rpn_class_logits: [batch & ROI]; predicted class logits from RPN
+            rpn_bbox_deltas: [batch & ROI, 4]; predicted bounding box deltas
+            rcnn_target_class_ids: [batch & TGT]; RCNN target class IDs
+            rcnn_pred_logits: [batch & TGT, cls]; RCNN predicted class logits
+            rcnn_target_deltas: [batch & TGT, 4]; RCNN target box deltas
+            rcnn_pred_deltas: [batch & TGT, cls, 4]; RCNN predicted box deltas
+            n_targets_per_sample: [batch] the number of targets in each sample
         """
-        (rpn_class_logits, rpn_bbox, target_class_ids, rcnn_class_logits,
-         target_deltas, rcnn_bbox, n_targets_per_sample) = self._train_forward(
-            molded_images, gt_class_ids, gt_boxes, n_gts_per_sample, hard_negative_mining=hard_negative_mining)
+        (rpn_class_logits, rpn_bbox_deltas, rcnn_target_class_ids, rcnn_pred_logits,
+         rcnn_target_deltas, rcnn_pred_deltas, n_targets_per_sample) = self._train_forward(
+            images, gt_class_ids, gt_boxes, n_gts_per_sample, hard_negative_mining=hard_negative_mining)
 
-        target_class_ids, rcnn_class_logits, target_deltas, rcnn_bbox = \
-            flatten_detections(n_targets_per_sample, target_class_ids, rcnn_class_logits, target_deltas, rcnn_bbox)
+        rcnn_target_class_ids, rcnn_pred_logits, rcnn_target_deltas, rcnn_pred_deltas = \
+            flatten_detections(n_targets_per_sample, rcnn_target_class_ids, rcnn_pred_logits, rcnn_target_deltas, rcnn_pred_deltas)
 
-        return (rpn_class_logits, rpn_bbox, target_class_ids, rcnn_class_logits,
-                target_deltas, rcnn_bbox, n_targets_per_sample)
+        return (rpn_class_logits, rpn_bbox_deltas, rcnn_target_class_ids, rcnn_pred_logits,
+                rcnn_target_deltas, rcnn_pred_deltas, n_targets_per_sample)
 
 
     @alt_forward_method
-    def train_loss_forward(self, molded_images, rpn_target_match, rpn_target_bbox, rpn_num_pos,
+    def train_loss_forward(self, images, rpn_target_match, rpn_target_bbox, rpn_num_pos,
                            gt_class_ids, gt_boxes, n_gts_per_sample, hard_negative_mining=False):
+        """
+        Training forward pass returning per-sample losses.
+
+        :param images: training images
+        :param rpn_target_match: [batch, anchors]. Anchor match type. 1=positive,
+                   -1=negative, 0=neutral anchor.
+        :param rpn_target_bbox: [batch, max positive anchors, (dy, dx, log(dh), log(dw))].
+            Uses 0 padding to fill in unsed bbox deltas.
+        :param rpn_num_pos: [batch] number of positives per sample
+        :param gt_class_ids: ground truth box classes [batch, detection]
+        :param gt_boxes: ground truth boxes [batch, detection, [y1, x1, y2, x2]
+        :param n_gts_per_sample: number of ground truth detections per sample [batch]
+        :param hard_negative_mining: if True, use hard negative mining to choose samples for training R-CNN head
+
+        :return: (rpn_class_losses, rpn_bbox_losses, rcnn_class_losses, rcnn_bbox_losses) where
+            rpn_class_losses: [batch] RPN objectness per-sample loss
+            rpn_bbox_losses: [batch] RPN box delta per-sample loss
+            rcnn_class_losses: [batch] RCNN classification per-sample loss
+            rcnn_bbox_losses: [batch] RCNN box delta per-sample loss
+        """
         rpn_class_logits, rpn_pred_bbox, target_class_ids, rcnn_class_logits, target_deltas, rcnn_bbox, \
-            n_targets_per_sample = self._train_forward(molded_images, gt_class_ids, gt_boxes, n_gts_per_sample,
-                                   hard_negative_mining=hard_negative_mining)
+            n_targets_per_sample = self._train_forward(images, gt_class_ids, gt_boxes, n_gts_per_sample,
+                                                       hard_negative_mining=hard_negative_mining)
 
         rpn_class_losses, rpn_bbox_losses = compute_rpn_losses_per_sample(
             self.config, rpn_class_logits, rpn_pred_bbox, rpn_target_match, rpn_target_bbox, rpn_num_pos)
@@ -1029,29 +1145,26 @@ class AbstractFasterRCNNModel (FasterRCNNBaseModel):
                 rcnn_class_losses.append(rcnn_class_loss[None])
                 rcnn_bbox_losses.append(rcnn_bbox_loss[None])
             else:
-                rcnn_class_losses.append(torch.tensor([0.0], dtype=torch.float, device=molded_images.device))
-                rcnn_bbox_losses.append(torch.tensor([0.0], dtype=torch.float, device=molded_images.device))
+                rcnn_class_losses.append(torch.tensor([0.0], dtype=torch.float, device=images.device))
+                rcnn_bbox_losses.append(torch.tensor([0.0], dtype=torch.float, device=images.device))
         rcnn_class_losses = torch.cat(rcnn_class_losses, dim=0)
         rcnn_bbox_losses = torch.cat(rcnn_bbox_losses, dim=0)
 
         return (rpn_class_losses, rpn_bbox_losses, rcnn_class_losses, rcnn_bbox_losses)
 
 
-    @alt_forward_method
     def detect_forward(self, images, image_windows, override_class=None):
-        """Runs the detection pipeline.
+        """Runs the detection pipeline and returns the results as torch tensors.
 
-        images: Tensor of images
-        image_windows: tensor of image windows where each row is [y1, x1, y2, x2]
-        override_class: int or None; override class ID to always be this class
+        :param images: tensor of images
+        :param image_windows: tensor of image windows where each row is [y1, x1, y2, x2]
+        :param override_class: int or None; override class ID to always be this class
 
-        Returns: [detection0, detection1, ... detectionN]
-        List of detections, one per sample, where each detection is a tuple of:
-        (det_boxes, det_class_ids, det_scores, mrcnn_mask) where:
-            det_boxes: [1, detections, [y1, x1, y2, x2]]
-            det_class_ids: [1, detections]
-            det_scores: [1, detections]
-            mrcnn_mask: [1, detections, height, width, obj_class]
+        :return: (det_boxes, det_class_ids, det_scores) where
+            det_boxes: [batch, n_rois_after_nms, 4] detection boxes
+            det_class_ids: [batch, n_rois_after_nms] detection class IDs
+            roi_scores: [batch, n_rois_after_nms] detection confidence scores
+            n_dets_per_sample: [batch] number of detections per sample in the batch
         """
         image_size = images.shape[2:]
 
@@ -1068,7 +1181,40 @@ class AbstractFasterRCNNModel (FasterRCNNBaseModel):
         # det_class_ids: [batch, num_detections]
         # det_scores: [batch, num_detections]
         det_boxes, det_class_ids, det_scores, n_dets_per_sample = self.rcnn_detect_forward(
-            images, image_windows, rcnn_feature_maps, rpn_rois, n_rois_per_sample, override_class=override_class)
+            image_size, image_windows, rcnn_feature_maps, rpn_rois, n_rois_per_sample, override_class=override_class)
+
+        return det_boxes, det_class_ids, det_scores, n_dets_per_sample
+
+
+    def detect_forward_np(self, images, image_windows, override_class=None):
+        """Runs the detection pipeline and returns the results as a list of detection tuples consisting of NumPy arrays
+
+        :param images: tensor of images
+        :param image_windows: tensor of image windows where each row is [y1, x1, y2, x2]
+        :param override_class: int or None; override class ID to always be this class
+
+        :return: [detection0, detection1, ... detectionN] List of detections, one per sample, where each
+                detection is a tuple of:
+            det_boxes: [1, detections, [y1, x1, y2, x2]] detection boxes
+            det_class_ids: [1, detections] detection class IDs
+            det_scores: [1, detections] detection confidence scores
+        """
+        image_size = images.shape[2:]
+
+        # rpn_feature_maps: [batch, channels, height, width]
+        # mrcnn_feature_maps: [batch, channels, height, width]
+        # rpn_bbox: [batch, anchors, 4]
+        # rpn_rois: [batch, n_rois_after_nms, 4]
+        # roi_scores: [batch, n_rois_after_nms]
+        # n_rois_per_sample: [batch]
+        rpn_feature_maps, rcnn_feature_maps, rpn_bbox_deltas, rpn_rois, roi_scores, n_rois_per_sample = self.rpn_detect_forward(
+            images)
+
+        # det_boxes: [batch, num_detections, (y1, x1, y2, x2)] in image coordinates
+        # det_class_ids: [batch, num_detections]
+        # det_scores: [batch, num_detections]
+        det_boxes, det_class_ids, det_scores, n_dets_per_sample = self.rcnn_detect_forward(
+            image_size, image_windows, rcnn_feature_maps, rpn_rois, n_rois_per_sample, override_class=override_class)
 
         if is_empty(det_boxes) or is_empty(det_class_ids) or is_empty(det_scores):
             # No detections

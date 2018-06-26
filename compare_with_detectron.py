@@ -263,7 +263,7 @@ with torch.no_grad():
     scale = np.array([inputs['data'].shape[2], inputs['data'].shape[3], inputs['data'].shape[2], inputs['data'].shape[3]])
 
     rpn_feature_maps, mrcnn_feature_maps, rpn_class_logits_by_lvl, rpn_bbox_by_lvl, rpn_rois, roi_scores, n_rois_per_sample = \
-        net._feature_maps_proposals_and_roi_by_level(x_var, config.RPN_PRE_NMS_LIMIT_TEST, net.config.RPN_POST_NMS_ROIS_INFERENCE)
+        net._feature_maps_rpn_preds_and_roi_by_level(x_var, config.RPN_PRE_NMS_LIMIT_TEST, net.config.RPN_POST_NMS_ROIS_INFERENCE)
 
     for lvl_i, (rpn_class_logits, rpn_bbox) in enumerate(zip(rpn_class_logits_by_lvl, rpn_bbox_by_lvl)):
         print('lvl {} rpn_class_logits.shape={}'.format(lvl_i, rpn_class_logits.shape))
