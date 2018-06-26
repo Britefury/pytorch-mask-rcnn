@@ -310,7 +310,7 @@ def refine_detections(config, rois_nrm, pred_class_probs, pred_box_deltas, windo
     refined_rois = clip_to_window(window, refined_rois)
     refined_sizes = refined_rois[:, 2:4] - refined_rois[:, 0:2]
 
-    # Round and cast to int since we're deadling with pixels now
+    # Round and cast to int since we're dealing with pixels now
     refined_rois = torch.round(refined_rois)
     refined_sizes = refined_rois[:, 2:4] - refined_rois[:, 0:2]
 
@@ -387,7 +387,7 @@ def refine_detections_batch(config, rois_nrm, pred_class_probs, pred_box_deltas,
     :param override_class: int or None; override class ID to always be this class
 
     :return: (det_boxes, det_class_ids, det_scores, n_dets_per_sample) where
-        det_boxes: [batch, num_detections, (y1, x1, y2, x2)] (pixel co-ordinates)
+        det_boxes: [batch, num_detections, (y1, x1, y2, x2)] (image co-ordinates)
         det_class_ids: [batch, num_detections]
         det_scores: [batch, num_detections]
         n_dets_per_sample: [batch]
@@ -943,7 +943,7 @@ class FasterRCNNBaseModel (RPNBaseModel):
         :param override_class: int or None; override class ID to always be this class
 
         :return: (det_boxes, det_class_ids, det_scores, n_dets_per_sample) where
-            det_boxes: [batch, num_detections, (y1, x1, y2, x2)] (pixel co-ordinates)
+            det_boxes: [batch, num_detections, (y1, x1, y2, x2)] (image co-ordinates)
             det_class_ids: [batch, num_detections]
             det_scores: [batch, num_detections]
             n_dets_per_sample: [batch]
@@ -1157,7 +1157,7 @@ class AbstractFasterRCNNModel (FasterRCNNBaseModel):
         :param image_windows: tensor of image windows where each row is [y1, x1, y2, x2]
         :param override_class: int or None; override class ID to always be this class
 
-        :return: (det_boxes, det_class_ids, det_scores) where
+        :return: (det_boxes, det_class_ids, det_scores, n_dets_per_sample) where
             det_boxes: [batch, n_rois_after_nms, 4] detection boxes
             det_class_ids: [batch, n_rois_after_nms] detection class IDs
             roi_scores: [batch, n_rois_after_nms] detection confidence scores
@@ -1196,22 +1196,8 @@ class AbstractFasterRCNNModel (FasterRCNNBaseModel):
             det_class_ids: [1, detections] detection class IDs
             det_scores: [1, detections] detection confidence scores
         """
-        image_size = images.shape[2:]
-
-        # rpn_feature_maps: [batch, channels, height, width]
-        # mrcnn_feature_maps: [batch, channels, height, width]
-        # rpn_bbox: [batch, anchors, 4]
-        # rpn_rois: [batch, n_rois_after_nms, 4]
-        # roi_scores: [batch, n_rois_after_nms]
-        # n_rois_per_sample: [batch]
-        rpn_feature_maps, rcnn_feature_maps, rpn_bbox_deltas, rpn_rois, roi_scores, n_rois_per_sample = self.rpn_detect_forward(
-            images)
-
-        # det_boxes: [batch, num_detections, (y1, x1, y2, x2)] in image coordinates
-        # det_class_ids: [batch, num_detections]
-        # det_scores: [batch, num_detections]
-        det_boxes, det_class_ids, det_scores, n_dets_per_sample = self.rcnn_detect_forward(
-            image_size, image_windows, rcnn_feature_maps, rpn_rois, n_rois_per_sample, override_class=override_class)
+        det_boxes, det_class_ids, det_scores, n_dets_per_sample = self.detect_forward(
+            images, image_windows, override_class=override_class)
 
         if is_empty(det_boxes) or is_empty(det_class_ids) or is_empty(det_scores):
             # No detections
@@ -1220,14 +1206,6 @@ class AbstractFasterRCNNModel (FasterRCNNBaseModel):
                      np.zeros((n_images, 0), dtype=int),
                      np.zeros((n_images, 0), dtype=np.float32))
                     for i in range(n_images)]
-
-        # Convert boxes to normalized coordinates
-        # TODO: let DetectionLayer return normalized coordinates to avoid
-        #       unnecessary conversions
-
-        #
-        # Detections done
-        #
 
         # Convert to numpy
         det_boxes_np = det_boxes.cpu().numpy()

@@ -38,7 +38,7 @@ class MaskHead (nn.Module):
     roi_align_sampling_ratio: sampling ratio for 'roi_align' function
 
     Invoking this model returns mask predictions mask_pred:
-        mask_pred: [batch, detection, mask_height, mask_width, cls] class specific mask predicted probabilities
+        mask_pred: [batch, detection, cls, mask_height, mask_width] class specific mask predicted probabilities
     """
     def __init__(self, config, depth, pool_size, num_classes, roi_canonical_scale, roi_canonical_level,
                  min_pyramid_level, max_pyramid_level, roi_align_function, roi_align_sampling_ratio):
@@ -154,7 +154,7 @@ def compute_mrcnn_mask_loss(target_masks, target_class_ids, pred_masks):
 
     :param target_masks: [num_rois, mask_height, mask_width]. Mask targets as a float32 tensor of values 0 or 1.
     :param target_class_ids: [num_rois]. Target class IDs.
-    :param pred_masks: [num_rois, height, width, num_classes] Class specific mask predictions.
+    :param pred_masks: [num_rois, cls, height, width] Class specific mask predictions.
     :return: loss as a torch scalar
     """
     device = pred_masks.device
@@ -646,8 +646,8 @@ class AbstractMaskRCNNModel (FasterRCNNBaseModel):
             rcnn_pred_logits: [batch, ROI, cls]; RCNN predicted class logits
             rcnn_target_deltas: [batch, ROI, 4]; RCNN target box deltas
             rcnn_pred_deltas: [batch, ROI, cls, 4]; RCNN predicted box deltas
-            mrcnn_target_mask: [batch, RCNN_TRAIN_ROIS_PER_IMAGE, mask_height, mask_width) Mask targets
-            mrcnn_pred_mask: [batch, detection, mask_height, mask_width, cls] class specific mask predicted probabilities
+            mrcnn_target_mask: [batch, ROI, mask_height, mask_width) Mask targets
+            mrcnn_pred_mask: [batch, ROI, cls, mask_height, mask_width] class specific mask predicted probabilities
             n_targets_per_sample: [batch] the number of target ROIs in each sample
         """
         device = images.device
@@ -689,6 +689,7 @@ class AbstractMaskRCNNModel (FasterRCNNBaseModel):
                 mrcnn_mask = torch.zeros([0], dtype=torch.float, device=device)
             else:
                 # Create masks for detections
+                # mrcnn_mask: [batch, detection, cls, mask_height, mask_width]
                 mrcnn_mask = self.mask(mrcnn_feature_maps, rois, n_targets_per_sample, image_size)
 
         else:
@@ -713,6 +714,7 @@ class AbstractMaskRCNNModel (FasterRCNNBaseModel):
                     mrcnn_feature_maps, rois, n_targets_per_sample, image_size)
 
                 # Create masks for detections
+                # mrcnn_mask: [batch, detection, cls, mask_height, mask_width]
                 mrcnn_mask = self.mask(mrcnn_feature_maps, rois, n_targets_per_sample, image_size)
 
         return [rpn_class_logits, rpn_bbox, target_class_ids, mrcnn_class_logits,
@@ -720,31 +722,31 @@ class AbstractMaskRCNNModel (FasterRCNNBaseModel):
 
 
     @alt_forward_method
-    def train_forward(self, molded_images, gt_class_ids, gt_boxes, gt_masks, n_gts_per_sample, hard_negative_mining=False):
-        """Supervised forward training pass helper
+    def train_forward(self, images, gt_class_ids, gt_boxes, gt_masks, n_gts_per_sample, hard_negative_mining=False):
+        """Supervised forward training pass
 
-        molded_images: Tensor of images
-        gt_class_ids: ground truth detection classes [batch, detection]
-        gt_boxes: ground truth detection boxes [batch, detection, [y1, x1, y2, x2]
-        n_gts_per_sample: number of ground truth detections per sample [batch]
-        hard_negative_mining: if True, use hard negative mining to choose samples for training R-CNN head
+        :param images: Tensor of images
+        :param gt_class_ids: ground truth box classes [batch, detection]
+        :param gt_boxes: ground truth boxes [batch, detection, [y1, x1, y2, x2]
+        :param gt_masks: ground truth masks [batch, detection, mask_height, mask_width]
+        :param n_gts_per_sample: number of ground truth detections per sample [batch]
+        :param hard_negative_mining: if True, use hard negative mining to choose samples for training R-CNN head
 
-        Returns:
-            (rpn_class_logits, rpn_bbox, target_class_ids, rcnn_class_logits,
-                    target_deltas, rcnn_bbox, target_mask, mrcnn_mask, n_targets_per_sample) where
-                rpn_class_logits: [batch, anchor]; predicted class logits from RPN
-                rpn_bbox: [batch, anchor, 4]; predicted bounding box deltas
-                target_class_ids: [batch, ROI]; RCNN target class IDs
-                rcnn_class_logits: [batch, ROI, cls]; RCNN predicted class logits
-                target_deltas: [batch, ROI, 4]; RCNN target box deltas
-                rcnn_bbox: [batch, ROI, cls, 4]; RCNN predicted box deltas
-                target_mask: [batch, ROI, mask_height, mask_width]; target masks
-                mrcnn_mask: [batch, ROI, mask_height, mask_width, cls]; predicted masks
-                n_targets_per_sample: [batch] the number of target ROIs in each sample
+        :return: (rpn_class_logits, rpn_bbox_deltas, rcnn_target_class_ids, rcnn_pred_logits,
+                  rcnn_target_deltas, rcnn_pred_deltas, n_targets_per_sample) where:
+            rpn_class_logits: [batch & ROI]; predicted class logits from RPN
+            rpn_bbox_deltas: [batch & ROI, 4]; predicted bounding box deltas
+            rcnn_target_class_ids: [batch & TGT]; RCNN target class IDs
+            rcnn_pred_logits: [batch & TGT, cls]; RCNN predicted class logits
+            rcnn_target_deltas: [batch & TGT, 4]; RCNN target box deltas
+            rcnn_pred_deltas: [batch & TGT, cls, 4]; RCNN predicted box deltas
+            mrcnn_target_mask: [batch & TGT, mask_height, mask_width) Mask targets
+            mrcnn_pred_mask: [batch & TGT, mask_height, mask_width, cls] class specific mask predicted probabilities
+            n_targets_per_sample: [batch] the number of targets in each sample
         """
         (rpn_class_logits, rpn_bbox, target_class_ids, mrcnn_class_logits,
             target_deltas, mrcnn_bbox, target_mask, mrcnn_mask, n_targets_per_sample) = self._train_forward(
-                    molded_images, gt_class_ids, gt_boxes, gt_masks, n_gts_per_sample,
+                    images, gt_class_ids, gt_boxes, gt_masks, n_gts_per_sample,
                     hard_negative_mining=hard_negative_mining)
 
         target_class_ids, mrcnn_class_logits, target_deltas, mrcnn_bbox, target_mask, mrcnn_mask = \
@@ -755,11 +757,33 @@ class AbstractMaskRCNNModel (FasterRCNNBaseModel):
 
 
     @alt_forward_method
-    def train_loss_forward(self, molded_images, rpn_target_match, rpn_target_bbox, rpn_num_pos,
+    def train_loss_forward(self, images, rpn_target_match, rpn_target_bbox, rpn_num_pos,
                            gt_class_ids, gt_boxes, gt_masks, n_gts_per_sample, hard_negative_mining=False):
+        """
+        Training forward pass returning per-sample losses.
+
+        :param images: training images
+        :param rpn_target_match: [batch, anchors]. Anchor match type. 1=positive,
+                   -1=negative, 0=neutral anchor.
+        :param rpn_target_bbox: [batch, max positive anchors, (dy, dx, log(dh), log(dw))].
+            Uses 0 padding to fill in unsed bbox deltas.
+        :param rpn_num_pos: [batch] number of positives per sample
+        :param gt_class_ids: ground truth box classes [batch, detection]
+        :param gt_boxes: ground truth boxes [batch, detection, [y1, x1, y2, x2]
+        :param gt_masks: ground truth masks [batch, detection, mask_height, mask_width]
+        :param n_gts_per_sample: number of ground truth detections per sample [batch]
+        :param hard_negative_mining: if True, use hard negative mining to choose samples for training R-CNN head
+
+        :return: (rpn_class_losses, rpn_bbox_losses, rcnn_class_losses, rcnn_bbox_losses, mrcnn_mask_losses) where
+            rpn_class_losses: [batch] RPN objectness per-sample loss
+            rpn_bbox_losses: [batch] RPN box delta per-sample loss
+            rcnn_class_losses: [batch] RCNN classification per-sample loss
+            rcnn_bbox_losses: [batch] RCNN box delta per-sample loss
+            mrcnn_mask_losses: [batch] Mask-RCNN mask per-sample loss
+        """
         (rpn_class_logits, rpn_pred_bbox, target_class_ids, rcnn_class_logits,
             target_deltas, rcnn_bbox, target_mask, mrcnn_mask, n_targets_per_sample) = self._train_forward(
-                    molded_images, gt_class_ids, gt_boxes, gt_masks, n_gts_per_sample,
+                    images, gt_class_ids, gt_boxes, gt_masks, n_gts_per_sample,
                     hard_negative_mining=hard_negative_mining)
 
         rpn_class_losses, rpn_bbox_losses = compute_rpn_losses_per_sample(
@@ -782,9 +806,9 @@ class AbstractMaskRCNNModel (FasterRCNNBaseModel):
                 rcnn_bbox_losses.append(rcnn_bbox_loss[None])
                 mrcnn_mask_losses.append(mrcnn_mask_loss[None])
             else:
-                rcnn_class_losses.append(torch.tensor([0.0], dtype=torch.float, device=molded_images.device))
-                rcnn_bbox_losses.append(torch.tensor([0.0], dtype=torch.float, device=molded_images.device))
-                mrcnn_mask_losses.append(torch.tensor([0.0], dtype=torch.float, device=molded_images.device))
+                rcnn_class_losses.append(torch.tensor([0.0], dtype=torch.float, device=images.device))
+                rcnn_bbox_losses.append(torch.tensor([0.0], dtype=torch.float, device=images.device))
+                mrcnn_mask_losses.append(torch.tensor([0.0], dtype=torch.float, device=images.device))
         rcnn_class_losses = torch.cat(rcnn_class_losses, dim=0)
         rcnn_bbox_losses = torch.cat(rcnn_bbox_losses, dim=0)
         mrcnn_mask_losses = torch.cat(mrcnn_mask_losses, dim=0)
@@ -792,37 +816,33 @@ class AbstractMaskRCNNModel (FasterRCNNBaseModel):
         return (rpn_class_losses, rpn_bbox_losses, rcnn_class_losses, rcnn_bbox_losses, mrcnn_mask_losses)
 
 
-    def mask_detect_forward(self, images, mrcnn_feature_maps, det_boxes, n_dets_per_sample):
+    def mask_detect_forward(self, image_size, mrcnn_feature_maps, det_boxes, det_class_ids, n_dets_per_sample):
         """Runs the mask stage of the detection pipeline.
 
-        images: Tensor of images
-        image_windows: tensor of image windows where each row is [y1, x1, y2, x2]
-        override_class: int or None; override class ID to always be this class
+        :param image_size: image shape as a (height, width) tuple
+        :param mrcnn_feature_maps: per-FPN level feature maps for RCNN;
+                list of [batch, feat_chn, lvl_height, lvl_width] tensors
+        :param det_boxes: [batch, N, (y1, x1, y2, x2)] detection boxes from RCNN in image coordinates
+        :param det_class_ids: [batch, N] detection class IDs from RCNN
+        :param n_dets_per_sample: number of detections per sample from RCNN
 
-        Returns: [detection0, detection1, ... detectionN]
-        List of detections, one per sample, where each detection is a tuple of:
-        (det_boxes, det_class_ids, det_scores, mrcnn_mask) where:
-            det_boxes: [1, detections, [y1, x1, y2, x2]]
-            det_class_ids: [1, detections]
-            det_scores: [1, detections]
-            mrcnn_mask: [1, detections, height, width, obj_class]
+        :return: [batch, detection, height, width] mask predictions as a torch tensor
         """
         device = det_boxes.device
 
-        image_size = images.shape[2:]
-
-        # Convert boxes to normalized coordinates
-        # TODO: let DetectionLayer return normalized coordinates to avoid
-        #       unnecessary conversions
+        # Convert boxes to normalized coordinates for mask generation
         h, w = image_size
         scale = torch.tensor(np.array([h, w, h, w]), dtype=torch.float, device=device)
-
-        # Normalized boxes for mask generation
         det_boxes_nrm = det_boxes / scale[None, None, :]
-
 
         # Generate masks
         mrcnn_mask = []
+
+        # Processing a large number of detections can use significant amounts of memory as the
+        # pyramid-roi-align step would need to generate a large number of feature maps
+        # to feed into the mask head and the convolutional layers in the mask head add additional load.
+        # To reduce this, process at most `self.config.DETECTION_BLOCK_SIZE_INFERENCE` detections
+        # per sample at a time.
         for mask_i in range(0, det_boxes_nrm.size()[1], self.config.DETECTION_BLOCK_SIZE_INFERENCE):
             mask_j = min(mask_i + self.config.DETECTION_BLOCK_SIZE_INFERENCE, det_boxes_nrm.size()[1])
 
@@ -830,40 +850,47 @@ class AbstractMaskRCNNModel (FasterRCNNBaseModel):
                 min(mask_j, n_dets) - min(mask_i, n_dets) for n_dets in n_dets_per_sample
             ]
 
+            # The pyramid_roi_align function will trim away unused detection boxes (zero padding),
+            # so the mask head won't waste resources.
+            # The mask head will also convert the resulting mask predictions to a [sample, detection, ...]
+            # shape with zero padding
             mrcnn_mask_block = self.mask(mrcnn_feature_maps, det_boxes_nrm[:, mask_i:mask_j, ...],
                                          n_dets_per_sample_block, image_size)
-            # mrcnn_mask: [batch, detection_index, object_class, height, width)
+            # mrcnn_mask_block: [batch, detection_index, object_class, height, width] with zero padding in dim1
 
-            mrcnn_mask_block = mrcnn_mask_block.permute(0, 1, 3, 4, 2).data.cpu().numpy()
-            mrcnn_mask.append(mrcnn_mask_block)
+            det_class_ids_block = det_class_ids[:, mask_i:mask_j]
 
-        mrcnn_mask = np.concatenate(mrcnn_mask, axis=1)
+            mrcnn_mask_block = mrcnn_mask_block.detach()
+
+            batch_det = mrcnn_mask_block.shape[0] * mrcnn_mask_block.shape[1]
+            masks_bd = mrcnn_mask_block.view(batch_det, *mrcnn_mask_block.shape[2:])
+            cls_ids_bd = det_class_ids_block.view(batch_det)
+            masks_cls_bd = masks_bd[torch.arange(batch_det, dtype=torch.long), cls_ids_bd, ...]
+            mrcnn_mask_block_cls = masks_cls_bd.view(mrcnn_mask_block.shape[0], mrcnn_mask_block.shape[1],
+                                                     mrcnn_mask_block.shape[3], mrcnn_mask_block.shape[4])
+
+            # mrcnn_mask_block_cls: [batch, detection_index, mask_height, mask_width]
+            mrcnn_mask.append(mrcnn_mask_block_cls)
+
+        mrcnn_mask = torch.cat(mrcnn_mask, axis=1)
 
         return mrcnn_mask
 
 
-    @alt_forward_method
     def detect_forward(self, images, image_windows, override_class=None):
-        """Runs the detection pipeline.
+        """Runs the detection pipeline and returns the results as torch tensors.
 
-        images: Tensor of images
-        image_windows: tensor of image windows where each row is [y1, x1, y2, x2]
-        override_class: int or None; override class ID to always be this class
+        :param images: tensor of images
+        :param image_windows: tensor of image windows where each row is [y1, x1, y2, x2]
+        :param override_class: int or None; override class ID to always be this class
 
-        Returns: [detection0, detection1, ... detectionN]
-        List of detections, one per sample, where each detection is a tuple of:
-        (det_boxes, det_class_ids, det_scores, mrcnn_mask) where:
-            det_boxes: [1, detections, [y1, x1, y2, x2]]
-            det_class_ids: [1, detections]
-            det_scores: [1, detections]
-            mrcnn_mask: [1, detections, height, width, obj_class]
+        :return: (det_boxes, det_class_ids, det_scores, mrcnn_mask, n_dets_per_sample) where
+            det_boxes: [batch, detection, 4] detection boxes
+            det_class_ids: [batch, detection] detection class IDs
+            roi_scores: [batch, detection] detection confidence scores
+            mrcnn_mask: [batch, detection, height, width] mask detections
+            n_dets_per_sample: [batch] number of detections per sample in the batch
         """
-        # rpn_feature_maps: [batch, channels, height, width]
-        # mrcnn_feature_maps: [batch, channels, height, width]
-        # rpn_bbox: [batch, anchors, 4]
-        # rpn_rois: [batch, n_rois_after_nms, 4]
-        # roi_scores: [batch, n_rois_after_nms]
-        # n_rois_per_sample: [batch]
         image_size = images.shape[2:]
 
         rpn_feature_maps, mrcnn_feature_maps, rpn_bbox_deltas, rpn_rois, roi_scores, n_rois_per_sample = self.rpn_detect_forward(
@@ -875,26 +902,43 @@ class AbstractMaskRCNNModel (FasterRCNNBaseModel):
         det_boxes, det_class_ids, det_scores, n_dets_per_sample = self.rcnn_detect_forward(
             image_size, image_windows, mrcnn_feature_maps, rpn_rois, n_rois_per_sample, override_class=override_class)
 
+        # mrcnn_mask: [batch, detection, height, width, cls]
+        mrcnn_mask = self.mask_detect_forward(image_size, mrcnn_feature_maps, det_boxes, det_class_ids, n_dets_per_sample)
+
+        return det_boxes, det_class_ids, det_scores, mrcnn_mask, n_dets_per_sample
+
+
+    def detect_forward_np(self, images, image_windows, override_class=None):
+        """Runs the detection pipeline and returns the results as a list of detection tuples consisting of NumPy arrays
+
+        :param images: tensor of images
+        :param image_windows: tensor of image windows where each row is [y1, x1, y2, x2]
+        :param override_class: int or None; override class ID to always be this class
+
+        :return: [detection0, detection1, ... detectionN] List of detections, one per sample, where each
+                detection is a tuple of:
+            det_boxes: [1, detections, [y1, x1, y2, x2]] detection boxes
+            det_class_ids: [1, detections] detection class IDs
+            det_scores: [1, detections] detection confidence scores
+            mrcnn_mask: [1, detections, height, width] mask detections
+        """
+        det_boxes, det_class_ids, det_scores, mrcnn_mask, n_dets_per_sample = self.detect_forward(
+            images, image_windows, override_class=override_class)
+
+
         if is_empty(det_boxes) or is_empty(det_class_ids) or is_empty(det_scores):
             # No detections
             n_images = images.shape[0]
             return [(np.zeros((n_images, 0, 4), dtype=np.float32),
                      np.zeros((n_images, 0), dtype=int),
                      np.zeros((n_images, 0), dtype=np.float32),
-                     np.zeros((n_images, 0) + tuple(self.config.MASK_SHAPE) + (self.config.NUM_CLASSES,), dtype=np.float32))
+                     np.zeros((n_images, 0) + tuple(self.config.MASK_SHAPE), dtype=np.float32))
                     for i in range(n_images)]
-
-
-        #
-        # Detections done
-        #
 
         # Convert to numpy
         det_boxes_np = det_boxes.data.cpu().numpy()
         det_class_ids_np = det_class_ids.data.cpu().numpy()
         det_scores_np = det_scores.data.cpu().numpy()
+        mrcnn_mask_np = mrcnn_mask.cpu().numpy()
 
-        mrcnn_mask = self.mask_detect_forward(images, mrcnn_feature_maps, det_boxes, n_dets_per_sample)
-
-
-        return split_detections(n_dets_per_sample, det_boxes_np, det_class_ids_np, det_scores_np, mrcnn_mask)
+        return split_detections(n_dets_per_sample, det_boxes_np, det_class_ids_np, det_scores_np, mrcnn_mask_np)
