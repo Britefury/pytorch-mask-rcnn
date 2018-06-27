@@ -112,7 +112,7 @@ void CropAndResizePerBox(
 }
 
 
-void crop_and_resize_forward(
+int crop_and_resize_forward(
     THFloatTensor * image,
     THFloatTensor * boxes,      // [y1, x1, y2, x2]
     THIntTensor * box_index,    // range in [0, batch_size)
@@ -129,8 +129,12 @@ void crop_and_resize_forward(
     const int num_boxes = boxes->size[0];
 
     // init output space
-    THFloatTensor_resize4d(crops, num_boxes, depth, crop_height, crop_width);
-    THFloatTensor_zero(crops);
+    if ((crops->size[0] != batch_size) ||
+        (crops->size[1] != depth) ||
+        (crops->size[2] != crop_height) ||
+        (crops->size[3] != crop_width)) {
+        return -1;
+    }
 
     // crop_and_resize for each box
     CropAndResizePerBox(
@@ -151,6 +155,7 @@ void crop_and_resize_forward(
         extrapolation_value
     );
 
+    return 0;
 }
 
 
@@ -177,9 +182,6 @@ void crop_and_resize_backward(
 
     const int channel_elements = crop_height * crop_width;
     const int crop_elements = depth * channel_elements;
-
-    // init output space
-    THFloatTensor_zero(grads_image);
 
     // data pointer
     const float * grads_data = THFloatTensor_data(grads);

@@ -11,9 +11,9 @@ int cpu_nms(THLongTensor * keep_out, THLongTensor * num_out, THFloatTensor * box
     long boxes_num = THFloatTensor_size(boxes, 0);
     long boxes_dim = THFloatTensor_size(boxes, 1);
 
-    long * keep_out_flat = THLongTensor_data(keep_out);
+    int64_t * keep_out_flat = THLongTensor_data(keep_out);
     float * boxes_flat = THFloatTensor_data(boxes);
-    long * order_flat = THLongTensor_data(order);
+    int64_t * order_flat = THLongTensor_data(order);
     float * areas_flat = THFloatTensor_data(areas);
 
     THByteTensor* suppressed = THByteTensor_newWithSize1d(boxes_num);
@@ -56,13 +56,13 @@ int cpu_nms(THLongTensor * keep_out, THLongTensor * num_out, THFloatTensor * box
             h = fmaxf(0.0, yy2 - yy1 + 1);
             inter = w * h;
             ovr = inter / (iarea + areas_flat[j] - inter);
-            if (ovr >= nms_overlap_thresh) {
+            if (ovr > nms_overlap_thresh) {
                 suppressed_flat[j] = 1;
             }
         }
     }
 
-    long *num_out_flat = THLongTensor_data(num_out);
+    int64_t *num_out_flat = THLongTensor_data(num_out);
     *num_out_flat = num_to_keep;
     THByteTensor_free(suppressed);
     return 1;

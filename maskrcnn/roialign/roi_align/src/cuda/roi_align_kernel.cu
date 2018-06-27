@@ -123,14 +123,26 @@ extern "C" {
 
     int ROIAlignForwardLaucher(const float* image_in, const int num_rois, const int height, const int width,
                                const int channels, const int aligned_height, const int aligned_width,  const int sampling_ratio,
-                               const int *sample_indices, const float* boxes, float* crops_out, cudaStream_t stream) {
+                               const int *sample_indices, const float* boxes, float* crops_out, cudaStream_t stream, int device_id) {
         const int kThreadsPerBlock = 1024;
         const int output_size = num_rois * aligned_height * aligned_width * channels;
         cudaError_t err;
 
+        int cur_device_id;
+        cudaGetDevice(&cur_device_id);
+        // Change device ID if necessary
+        if (device_id != cur_device_id) {
+            cudaSetDevice(device_id);
+        }
+
         ROIAlignForward<<<(output_size + kThreadsPerBlock - 1) / kThreadsPerBlock, kThreadsPerBlock, 0, stream>>>(
           output_size, image_in, height, width, channels,
           aligned_height, aligned_width, sampling_ratio, sample_indices, boxes, crops_out);
+
+        // Set device ID back if necessary
+        if (device_id != cur_device_id) {
+            cudaSetDevice(cur_device_id);
+        }
 
         err = cudaGetLastError();
         if(cudaSuccess != err) {
@@ -271,14 +283,26 @@ extern "C" {
 
     int ROIAlignBackwardLaucher(const float* image_out_diff, const int batch_size, const int num_rois, const int height, const int width,
                                 const int channels, const int aligned_height, const int aligned_width, const int sampling_ratio,
-                                const int *sample_indices, const float* boxes, float* image_in_diff, cudaStream_t stream) {
+                                const int *sample_indices, const float* boxes, float* image_in_diff, cudaStream_t stream, int device_id) {
         const int kThreadsPerBlock = 1024;
         const int output_size = num_rois * aligned_height * aligned_width * channels;
         cudaError_t err;
 
+        int cur_device_id;
+        cudaGetDevice(&cur_device_id);
+        // Change device ID if necessary
+        if (device_id != cur_device_id) {
+            cudaSetDevice(device_id);
+        }
+
         ROIAlignBackward<<<(output_size + kThreadsPerBlock - 1) / kThreadsPerBlock, kThreadsPerBlock, 0, stream>>>(
           output_size, image_out_diff, height, width, channels,
           aligned_height, aligned_width,  sampling_ratio, image_in_diff, sample_indices, boxes);
+
+        // Set device ID back if necessary
+        if (device_id != cur_device_id) {
+            cudaSetDevice(cur_device_id);
+        }
 
         err = cudaGetLastError();
         if(cudaSuccess != err) {

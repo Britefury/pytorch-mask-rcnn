@@ -169,7 +169,7 @@ void CropAndResizeLaucher(
     const float *image_ptr, const float *boxes_ptr,
     const int *box_ind_ptr, int num_boxes, int batch, int image_height,
     int image_width, int crop_height, int crop_width, int depth,
-    float extrapolation_value, float *crops_ptr, cudaStream_t stream)
+    float extrapolation_value, float *crops_ptr, cudaStream_t stream, int device_id)
 {   
     const int total_count = num_boxes * crop_height * crop_width * depth;
     const int thread_per_block = 1024;
@@ -178,10 +178,22 @@ void CropAndResizeLaucher(
 
     if (total_count > 0)
     {
+        int cur_device_id;
+        cudaGetDevice(&cur_device_id);
+        // Change device ID if necessary
+        if (device_id != cur_device_id) {
+            cudaSetDevice(device_id);
+        }
+
         CropAndResizeKernel<<<block_count, thread_per_block, 0, stream>>>(
             total_count, image_ptr, boxes_ptr,
             box_ind_ptr, num_boxes, batch, image_height, image_width,
             crop_height, crop_width, depth, extrapolation_value, crops_ptr);
+
+        // Set device ID back if necessary
+        if (device_id != cur_device_id) {
+            cudaSetDevice(cur_device_id);
+        }
 
         err = cudaGetLastError();
         if (cudaSuccess != err)
@@ -197,7 +209,7 @@ void CropAndResizeBackpropImageLaucher(
     const float *grads_ptr, const float *boxes_ptr,
     const int *box_ind_ptr, int num_boxes, int batch, int image_height,
     int image_width, int crop_height, int crop_width, int depth,
-    float *grads_image_ptr, cudaStream_t stream)
+    float *grads_image_ptr, cudaStream_t stream, int device_id)
 {   
     const int total_count = num_boxes * crop_height * crop_width * depth;
     const int thread_per_block = 1024;
@@ -206,10 +218,22 @@ void CropAndResizeBackpropImageLaucher(
 
     if (total_count > 0)
     {
+        int cur_device_id;
+        cudaGetDevice(&cur_device_id);
+        // Change device ID if necessary
+        if (device_id != cur_device_id) {
+            cudaSetDevice(device_id);
+        }
+
         CropAndResizeBackpropImageKernel<<<block_count, thread_per_block, 0, stream>>>(
             total_count, grads_ptr, boxes_ptr,
             box_ind_ptr, num_boxes, batch, image_height, image_width,
             crop_height, crop_width, depth, grads_image_ptr);
+
+        // Set device ID back if necessary
+        if (device_id != cur_device_id) {
+            cudaSetDevice(cur_device_id);
+        }
 
         err = cudaGetLastError();
         if (cudaSuccess != err)

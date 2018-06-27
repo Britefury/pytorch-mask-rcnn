@@ -10,7 +10,7 @@ THCState *state = at::globalContext().thc_state;
 
 extern "C" int roi_align_forward_cuda(int aligned_height, int aligned_width, int sampling_ratio,
                                       THCudaTensor * features, THCudaIntTensor * sample_indices, THCudaTensor * rois,
-                                      THCudaTensor * output)
+                                      THCudaTensor * output, int device_id)
 {
     // Grab the input tensor
     float * data_flat = THCudaTensor_data(state, features);
@@ -40,14 +40,14 @@ extern "C" int roi_align_forward_cuda(int aligned_height, int aligned_width, int
         data_flat, num_rois, data_height,
         data_width, num_channels, aligned_height,
         aligned_width, sampling_ratio, sample_indices_flat, rois_flat,
-        output_flat, stream);
+        output_flat, stream, device_id);
 
     return 1;
 }
 
 extern "C" int roi_align_backward_cuda(int aligned_height, int aligned_width, int sampling_ratio,
                                        THCudaTensor * top_grad, THCudaIntTensor * sample_indices, THCudaTensor * rois,
-                                       THCudaTensor * bottom_grad)
+                                       THCudaTensor * bottom_grad, int device_id)
 {
     // Grab the input tensor
     float * top_grad_flat = THCudaTensor_data(state, top_grad);
@@ -78,7 +78,7 @@ extern "C" int roi_align_backward_cuda(int aligned_height, int aligned_width, in
         top_grad_flat, batch_size, num_rois, data_height,
         data_width, num_channels, aligned_height,
         aligned_width, sampling_ratio, sample_indices_flat, rois_flat,
-        bottom_grad_flat, stream);
+        bottom_grad_flat, stream, device_id);
 
     return 1;
 }

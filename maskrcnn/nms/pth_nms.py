@@ -42,12 +42,12 @@ def pth_nms(dets, thresh):
     order = scores.sort(0, descending=True)[1]
     # order = torch.from_numpy(np.ascontiguousarray(scores.cpu().numpy().argsort()[::-1])).long().cuda()
 
-    dets = dets[order].contiguous()
+    dets_temp = dets_temp[order].contiguous()
 
     # keep and num_out are CPU tensors, NOT GPU
     keep = torch.zeros(dets.size(0), dtype=torch.long)
     num_out = torch.zeros(1, dtype=torch.long)
-    nms.gpu_nms(keep, num_out, dets_temp, thresh)
+    nms.gpu_nms(keep, num_out, dets_temp, thresh, device.index)
 
     return order[keep[:num_out[0]].to(device)].contiguous()
     # return order[keep[:num_out[0]]].contiguous()

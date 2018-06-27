@@ -2,8 +2,8 @@
 
 int roi_align_forward_cuda(int aligned_height, int aligned_width, int sampling_ratio,
                            THCudaTensor * features, THCudaIntTensor * sample_indices, THCudaTensor * rois,
-                           THCudaTensor * output);
+                           THCudaTensor * output, int device_id);
 
 int roi_align_backward_cuda(int aligned_height, int aligned_width, int sampling_ratio,
                             THCudaTensor * top_grad, THCudaIntTensor * sample_indices, THCudaTensor * rois,
-                            THCudaTensor * bottom_grad);
+                            THCudaTensor * bottom_grad, int device_id);

@@ -5,14 +5,15 @@
 THCState *state = at::globalContext().thc_state;
 
 
-extern "C" void crop_and_resize_gpu_forward(
-    THCudaTensor * image,
+extern "C" int crop_and_resize_gpu_forward(
+    THCudaTensor * image,           // shape = (sample, feature, height, width)
     THCudaTensor * boxes,           // [y1, x1, y2, x2]
     THCudaIntTensor * box_index,    // range in [0, batch_size)
     const float extrapolation_value,
     const int crop_height,
     const int crop_width,
-    THCudaTensor * crops
+    THCudaTensor * crops,            // shape = (crop, feature, crop_height, crop_width)
+    int device_id
 ) {
     const int batch_size = THCudaTensor_size(state, image, 0);
     const int depth = THCudaTensor_size(state, image, 1);
@@ -21,9 +22,12 @@ extern "C" void crop_and_resize_gpu_forward(
 
     const int num_boxes = THCudaTensor_size(state, boxes, 0);
 
-    // init output space
-    THCudaTensor_resize4d(state, crops, num_boxes, depth, crop_height, crop_width);
-    THCudaTensor_zero(state, crops);
+    if ((THCudaTensor_size(state, crops, 0) != num_boxes) ||
+        (THCudaTensor_size(state, crops, 1) != depth) ||
+        (THCudaTensor_size(state, crops, 2) != crop_height) ||
+        (THCudaTensor_size(state, crops, 3) != crop_width)) {
+        return -1;
+    }
 
     cudaStream_t stream = THCState_getCurrentStream(state);
     CropAndResizeLaucher(
@@ -33,16 +37,17 @@ extern "C" void crop_and_resize_gpu_forward(
         num_boxes, batch_size, image_height, image_width,
         crop_height, crop_width, depth, extrapolation_value,
         THCudaTensor_data(state, crops),
-        stream
+        stream, device_id
     );
 }
 
 
 extern "C" void crop_and_resize_gpu_backward(
-    THCudaTensor * grads,
+    THCudaTensor * grads,       // shape = (crop, feature, crop_height, crop_width)
     THCudaTensor * boxes,      // [y1, x1, y2, x2]
     THCudaIntTensor * box_index,    // range in [0, batch_size)
-    THCudaTensor * grads_image // resize to [bsize, c, hc, wc]
+    THCudaTensor * grads_image, // shape = (sample, feature, height, width)
+    int device_id
 ) {
     // shape
     const int batch_size = THCudaTensor_size(state, grads_image, 0);
@@ -54,9 +59,6 @@ extern "C" void crop_and_resize_gpu_backward(
     const int crop_height = THCudaTensor_size(state, grads, 2);
     const int crop_width = THCudaTensor_size(state, grads, 3);
 
-    // init output space
-    THCudaTensor_zero(state, grads_image);
-
     cudaStream_t stream = THCState_getCurrentStream(state);
     CropAndResizeBackpropImageLaucher(
         THCudaTensor_data(state, grads),
@@ -65,6 +67,6 @@ extern "C" void crop_and_resize_gpu_backward(
         num_boxes, batch_size, image_height, image_width,
         crop_height, crop_width, depth,
         THCudaTensor_data(state, grads_image),
-        stream
+        stream, device_id
     );
 }

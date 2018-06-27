@@ -26,7 +26,7 @@ class RoIAlignFunction(Function):
             roi_align.roi_align_forward_cuda(self.aligned_height,
                                              self.aligned_width,
                                              self.sampling_ratio, features,
-                                             sample_indices, rois, output)
+                                             sample_indices, rois, output, features.device.index)
         else:
             raise NotImplementedError
 
@@ -47,7 +47,7 @@ class RoIAlignFunction(Function):
                                           self.aligned_width,
                                           self.sampling_ratio, grad_output,
                                           sample_indices, rois,
-                                          grad_input)
+                                          grad_input, grad_output.device.index)
 
         # print grad_input
 

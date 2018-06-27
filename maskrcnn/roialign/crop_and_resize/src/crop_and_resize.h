@@ -1,4 +1,4 @@
-void crop_and_resize_forward(
+int crop_and_resize_forward(
     THFloatTensor * image,
     THFloatTensor * boxes,      // [y1, x1, y2, x2]
     THIntTensor * box_index,    // range in [0, batch_size)

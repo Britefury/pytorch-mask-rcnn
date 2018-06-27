@@ -3,14 +3,16 @@
 // Copyright (c) 2015 Microsoft
 // Licensed under The MIT License [see fast-rcnn/LICENSE for details]
 // Written by Shaoqing Ren
+//
+// Taken some code from
+// https://github.com/longcw/yolo2-pytorch/blob/master/utils/nms/nms_kernel.cu
+// for the purpose of allowing the NMS code to work on multiple GPUs.
 // ------------------------------------------------------------------
-#ifdef __cplusplus
-extern "C" {
-#endif
-
 #include <math.h>
 #include <stdio.h>
 #include <float.h>
+#include <vector>
+#include <iostream>
 #include "nms_kernel.h"
 
 __device__ inline float devIoU(float const * const a, float const * const b) {
@@ -24,7 +26,7 @@ __device__ inline float devIoU(float const * const a, float const * const b) {
 }
 
 __global__ void nms_kernel(const int n_boxes, const float nms_overlap_thresh,
-                           const float *dev_boxes, long int *dev_mask) {
+                           const float *dev_boxes, mask_t *dev_mask) {
   const int row_start = blockIdx.y;
   const int col_start = blockIdx.x;
 
@@ -54,7 +56,7 @@ __global__ void nms_kernel(const int n_boxes, const float nms_overlap_thresh,
     const int cur_box_idx = threadsPerBlock * row_start + threadIdx.x;
     const float *cur_box = dev_boxes + cur_box_idx * 5;
     int i = 0;
-    long int t = 0;
+    mask_t t = 0;
     int start = 0;
     if (row_start == col_start) {
       start = threadIdx.x + 1;
@@ -70,9 +72,34 @@ __global__ void nms_kernel(const int n_boxes, const float nms_overlap_thresh,
 }
 
 
-void _nms(int boxes_num, float * boxes_dev,
-          long int * mask_dev, float nms_overlap_thresh) {
+#define CUDA_CHECK(condition) \
+  /* Code block avoids redefinition of cudaError_t error */ \
+  do { \
+    cudaError_t error = condition; \
+    if (error != cudaSuccess) { \
+      std::cout << cudaGetErrorString(error) << std::endl; \
+    } \
+  } while (0)
 
+
+long _nms(int boxes_num, float * boxes_dev,
+         int64_t *keep_flat, float nms_overlap_thresh, int device_id) {
+  const int col_blocks = DIVUP(boxes_num, threadsPerBlock);
+
+  // Get the current device ID
+  int cur_device_id;
+  CUDA_CHECK(cudaGetDevice(&cur_device_id));
+  // Change device ID if necessary
+  if (device_id != cur_device_id) {
+    CUDA_CHECK(cudaSetDevice(device_id));
+  }
+
+  // Allocate device mask
+  mask_t* mask_dev = NULL;
+  CUDA_CHECK(cudaMalloc(&mask_dev, boxes_num * col_blocks * sizeof(mask_t)));
+  CUDA_CHECK(cudaMemset(mask_dev, 0, sizeof(mask_t) * boxes_num * col_blocks));
+
+  // Run NMS
   dim3 blocks(DIVUP(boxes_num, threadsPerBlock),
               DIVUP(boxes_num, threadsPerBlock));
   dim3 threads(threadsPerBlock);
@@ -80,8 +107,37 @@ void _nms(int boxes_num, float * boxes_dev,
                                   nms_overlap_thresh,
                                   boxes_dev,
                                   mask_dev);
-}
+  // Host mask array
+  std::vector<mask_t> mask_host(boxes_num * col_blocks);
+  CUDA_CHECK(cudaMemcpy(&mask_host[0], mask_dev,
+                        sizeof(mask_t) * boxes_num * col_blocks,
+                        cudaMemcpyDeviceToHost));
 
-#ifdef __cplusplus
+  CUDA_CHECK(cudaFree(mask_dev));
+
+  // Set device ID back if necessary
+  if (device_id != cur_device_id) {
+    CUDA_CHECK(cudaSetDevice(cur_device_id));
+  }
+
+  std::vector<mask_t> remv_host(col_blocks);
+  std::fill(remv_host.begin(), remv_host.end(), 0);
+
+  long num_to_keep = 0;
+
+  int i, j;
+  for (i = 0; i < boxes_num; i++) {
+    int nblock = i / threadsPerBlock;
+    int inblock = i % threadsPerBlock;
+
+    if (!(remv_host[nblock] & (1ULL << inblock))) {
+      keep_flat[num_to_keep++] = i;
+      mask_t *p = &mask_host[0] + i * col_blocks;
+      for (j = nblock; j < col_blocks; j++) {
+        remv_host[j] |= p[j];
+      }
+    }
+  }
+
+  return num_to_keep;
 }
-#endif

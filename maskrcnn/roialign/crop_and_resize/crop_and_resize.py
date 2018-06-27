@@ -15,16 +15,20 @@ class CropAndResizeFunction(Function):
         self.extrapolation_value = extrapolation_value
 
     def forward(self, image, boxes, box_ind):
-        crops = torch.zeros_like(image)
+        crops = torch.zeros(boxes.shape[0], image.shape[1],
+                            self.crop_height, self.crop_width,
+                            dtype=torch.float, device=image.device)
 
         if image.is_cuda:
-            _backend.crop_and_resize_gpu_forward(
+            status = _backend.crop_and_resize_gpu_forward(
                 image, boxes, box_ind,
-                self.extrapolation_value, self.crop_height, self.crop_width, crops)
+                self.extrapolation_value, self.crop_height, self.crop_width, crops, image.device.index)
         else:
-            _backend.crop_and_resize_forward(
+            status = _backend.crop_and_resize_forward(
                 image, boxes, box_ind,
                 self.extrapolation_value, self.crop_height, self.crop_width, crops)
+        if status == -1:
+            raise RuntimeError('CropAndResizeFunction.forward: crops.shape is incorrect')
 
         # save for backward
         self.im_size = image.size()
@@ -36,11 +40,11 @@ class CropAndResizeFunction(Function):
         boxes, box_ind = self.saved_tensors
 
         grad_outputs = grad_outputs.contiguous()
-        grad_image = torch.zeros_like(grad_outputs).resize_(*self.im_size)
+        grad_image = torch.zeros(self.im_size, dtype=grad_outputs.dtype, device=grad_outputs.device)
 
         if grad_outputs.is_cuda:
             _backend.crop_and_resize_gpu_backward(
-                grad_outputs, boxes, box_ind, grad_image
+                grad_outputs, boxes, box_ind, grad_image, grad_outputs.device.index
             )
         else:
             _backend.crop_and_resize_backward(
