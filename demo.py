@@ -1,15 +1,10 @@
 import os
-import sys
-import random
-import math
-import numpy as np
+import time
 import skimage.io
-import matplotlib
 import matplotlib.pyplot as plt
 
 import coco
-import utils
-import model as modellib
+import coco_model as modellib
 import visualize
 
 import torch
@@ -35,12 +30,18 @@ class InferenceConfig(coco.CocoConfig):
     # GPU_COUNT = 0 for CPU
     GPU_COUNT = 1
     IMAGES_PER_GPU = 1
+    COMPAT_MATTERPORT = True
+    RPN_HIDDEN_CHANNELS = 512
+    RPN_OBJECTNESS_SOFTMAX = True
+    CENTRE_ANCHORS = False
+    ANCHORS_ROUND_UP_FEATURE_SHAPE = False
+    ANCHORS_DETECTRON = False
 
 config = InferenceConfig()
 config.display()
 
 # Create model object.
-model = modellib.MaskRCNN(model_dir=MODEL_DIR, config=config)
+model = modellib.CocoMaskRCNN(model_dir=MODEL_DIR, config=config)
 if config.GPU_COUNT:
     model = model.cuda()
 
@@ -68,14 +69,20 @@ class_names = ['BG', 'person', 'bicycle', 'car', 'motorcycle', 'airplane',
 
 # Load a random image from the images folder
 file_names = next(os.walk(IMAGE_DIR))[2]
-#image = skimage.io.imread(os.path.join(IMAGE_DIR, random.choice(file_names)))
-image = skimage.io.imread(os.path.join(IMAGE_DIR, file_names[-1]))
 
-# Run detection
-results = model.detect([image])
+for filename in file_names:
+    image = skimage.io.imread(os.path.join(IMAGE_DIR, filename))
+    # image = skimage.io.imread(os.path.join(IMAGE_DIR, file_names[-1]))
 
-# Visualize results
-r = results[0]
-visualize.display_instances(image, r['rois'], r['masks'], r['class_ids'],
-                            class_names, r['scores'])
-plt.show()
+    # Run detection
+    t1 = time.time()
+    results = model.detect([image])
+    t2 = time.time()
+
+    print('Took {:.3f}s'.format(t2 - t1))
+
+    # Visualize results
+    r = results[0]
+    visualize.display_instances(image, r['rois'], r['masks'], r['class_ids'],
+                                class_names, r['scores'])
+    plt.show()

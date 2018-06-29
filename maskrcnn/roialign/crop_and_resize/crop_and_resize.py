@@ -50,6 +50,36 @@ class CropAndResizeFunction(Function):
         return grad_image, None, None
 
 
+class CropAndResizeAligned (object):
+    def __init__(self, crop_height, crop_width, extrapolation_value=0):
+        self._crop = CropAndResize(crop_height, crop_width, extrapolation_value=extrapolation_value)
+
+        self.crop_scale = float(crop_height) / float(crop_height + 1), float(crop_width) / float(crop_width + 1)
+
+
+    def __call__(self, image, boxes, box_ind):
+        device = image.device
+
+        dst_scale_var = torch.tensor([
+            [self.crop_scale[0], self.crop_scale[1], self.crop_scale[0], self.crop_scale[1]]], dtype=torch.float, device=device)
+
+        src_size = image.size()[2:]
+        src_scale = float(src_size[0]) / float(src_size[0] + 1), float(src_size[1]) / float(src_size[1] + 1)
+        src_scale = torch.tensor([[src_scale[0], src_scale[1], src_scale[0], src_scale[1]]], dtype=torch.float, device=device)
+
+        # Pad the image so that there is smooth interpolation along the edges
+        padded_image = F.pad(image, [1, 1, 1, 1])
+        box_centres = (boxes[:, :2] + boxes[:, 2:]) * 0.5
+        box_centres = torch.cat([box_centres, box_centres], dim=1)
+
+        # Move sample locations to the centres of the crop-box pixels
+        boxes_var = (boxes - box_centres) * dst_scale_var.detach() + box_centres
+        # Scale sample grid to cover complete range of input
+        boxes_var = (boxes_var - 0.5) * src_scale.detach() + 0.5
+
+        return self._crop(padded_image, boxes_var, box_ind)
+
+
 class CropAndResize(nn.Module):
     """
     Crop and resize ported from tensorflow

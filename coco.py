@@ -45,11 +45,9 @@ import zipfile
 import urllib.request
 import shutil
 
-from config import Config
-import utils
-import model as modellib
-
-import torch
+from maskrcnn.model.config import Config
+import coco_utils
+import coco_model as modellib
 
 # Root directory of the project
 ROOT_DIR = os.getcwd()
@@ -78,18 +76,86 @@ class CocoConfig(Config):
     # Adjust down if you use a smaller GPU.
     IMAGES_PER_GPU = 16
 
-    # Uncomment to train on 8 GPUs (default is 1)
-    # GPU_COUNT = 8
+    GPU_COUNT = 1
+
+    # Path to pretrained imagenet model
+    IMAGENET_MODEL_PATH = os.path.join(os.getcwd(), "resnet50_imagenet.pth")
+
 
     # Number of classes (including background)
     NUM_CLASSES = 1 + 80  # COCO has 80 classes
+
+    BN_EPS = 0.001
+
+    TORCH_PADDING = False
+
+    CENTRE_ANCHORS = False
+
+    ROI_ALIGN_FUNCTION = 'crop_and_resize'
+
+    # Number of training steps per epoch
+    # This doesn't need to match the size of the training set. Tensorboard
+    # updates are saved at the end of each epoch, so setting this to a
+    # smaller number means getting more frequent TensorBoard updates.
+    # Validation stats are also calculated at each epoch end and they
+    # might take a while, so don't set this too small to avoid spending
+    # a lot of time on validation stats.
+    STEPS_PER_EPOCH = 1000
+
+    # Number of validation steps to run at the end of every training epoch.
+    # A bigger number improves accuracy of validation stats, but slows
+    # down the training.
+    VALIDATION_STEPS = 50
+
+    # Learning rate and momentum
+    # The Mask RCNN paper uses lr=0.02, but on TensorFlow it causes
+    # weights to explode. Likely due to differences in optimzer
+    # implementation.
+    LEARNING_RATE = 0.001
+    LEARNING_MOMENTUM = 0.9
+
+    # Input image resing
+    # Images are resized such that the smallest side is >= IMAGE_MIN_DIM and
+    # the longest side is <= IMAGE_MAX_DIM. In case both conditions can't
+    # be satisfied together the IMAGE_MAX_DIM is enforced.
+    IMAGE_MIN_DIM = 800
+    IMAGE_MAX_DIM = 1024
+    # If True, pad images with zeros such that they're (max_dim by max_dim)
+    IMAGE_PADDING = True  # currently, the False option is not supported
+
+    # Image mean (RGB)
+    MEAN_PIXEL = np.array([123.7, 116.8, 103.9])
+
+    # Weight decay regularization
+    WEIGHT_DECAY = 0.0001
+
+    COMPAT_MATTERPORT = False
+
+    MASK_BATCH_NORM = True
+
+
+    def __init__(self):
+        super(CocoConfig, self).__init__()
+
+        # Effective batch size
+        if self.GPU_COUNT > 0:
+            self.BATCH_SIZE = self.IMAGES_PER_GPU * self.GPU_COUNT
+        else:
+            self.BATCH_SIZE = self.IMAGES_PER_GPU
+
+        # Adjust step size based on batch size
+        self.STEPS_PER_EPOCH = self.BATCH_SIZE * self.STEPS_PER_EPOCH
+
+        # Input image size
+        self.IMAGE_SHAPE = np.array(
+            [self.IMAGE_MAX_DIM, self.IMAGE_MAX_DIM, 3])
 
 
 ############################################################
 #  Dataset
 ############################################################
 
-class CocoDataset(utils.Dataset):
+class CocoDataset(coco_utils.Dataset):
     def load_coco(self, dataset_dir, subset, year=DEFAULT_DATASET_YEAR, class_ids=None,
                   class_map=None, return_coco=False, auto_download=False):
         """Load a subset of the COCO dataset.
@@ -441,17 +507,15 @@ if __name__ == '__main__':
             # one image at a time. Batch size = GPU_COUNT * IMAGES_PER_GPU
             GPU_COUNT = 1
             IMAGES_PER_GPU = 1
-            DETECTION_MIN_CONFIDENCE = 0
+            RCNN_DETECTION_MIN_CONFIDENCE = 0
         config = InferenceConfig()
     config.display()
 
     # Create model
     if args.command == "train":
-        model = modellib.MaskRCNN(config=config,
-                                  model_dir=args.logs)
+        model = modellib.CocoMaskRCNN(config=config, model_dir=args.logs)
     else:
-        model = modellib.MaskRCNN(config=config,
-                                  model_dir=args.logs)
+        model = modellib.CocoMaskRCNN(config=config, model_dir=args.logs)
     if config.GPU_COUNT:
         model = model.cuda()
 

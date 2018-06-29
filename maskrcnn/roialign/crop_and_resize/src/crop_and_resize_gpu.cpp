@@ -1,10 +1,11 @@
 #include <THC/THC.h>
+#include <ATen/ATen.h>
 #include "cuda/crop_and_resize_kernel.h"
 
-extern THCState *state;
+THCState *state = at::globalContext().thc_state;
 
 
-void crop_and_resize_gpu_forward(
+extern "C" void crop_and_resize_gpu_forward(
     THCudaTensor * image,
     THCudaTensor * boxes,           // [y1, x1, y2, x2]
     THCudaIntTensor * box_index,    // range in [0, batch_size)
@@ -37,7 +38,7 @@ void crop_and_resize_gpu_forward(
 }
 
 
-void crop_and_resize_gpu_backward(
+extern "C" void crop_and_resize_gpu_backward(
     THCudaTensor * grads,
     THCudaTensor * boxes,      // [y1, x1, y2, x2]
     THCudaIntTensor * box_index,    // range in [0, batch_size)

@@ -71,8 +71,10 @@ repository and longcw's [RoiAlign](https://github.com/longcw/RoIAlign.pytorch).
         python build.py
         cd ../../
 
-3. As we use the [COCO dataset](http://cocodataset.org/#home) install the [Python COCO API](https://github.com/cocodataset/cocoapi) and
-create a symlink.
+3. As we use the [COCO dataset](http://cocodataset.org/#home) install the
+[Python COCO API](https://github.com/cocodataset/cocoapi). In particular, use
+[this fork](https://github.com/waleedka/coco) as it has been fixed to work with Python 3. Then
+create a symlink:
 
         ln -s /path/to/coco/cocoapi/PythonAPI/pycocotools/ pycocotools
     

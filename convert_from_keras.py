@@ -105,6 +105,6 @@ for weight_name in list(state_dict.keys()):
         state_dict[weight_name] = state_dict[weight_name].transpose((1, 0)).copy(order='C')
 
 for weight_name in list(state_dict.keys()):
-    state_dict[weight_name] = torch.from_numpy(state_dict[weight_name])
 
+    state_dict[weight_name] = torch.from_numpy(state_dict[weight_name])
 torch.save(state_dict, args.pytorch_model)

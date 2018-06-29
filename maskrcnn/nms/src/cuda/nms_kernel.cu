@@ -24,7 +24,7 @@ __device__ inline float devIoU(float const * const a, float const * const b) {
 }
 
 __global__ void nms_kernel(const int n_boxes, const float nms_overlap_thresh,
-                           const float *dev_boxes, unsigned long long *dev_mask) {
+                           const float *dev_boxes, long int *dev_mask) {
   const int row_start = blockIdx.y;
   const int col_start = blockIdx.x;
 
@@ -54,7 +54,7 @@ __global__ void nms_kernel(const int n_boxes, const float nms_overlap_thresh,
     const int cur_box_idx = threadsPerBlock * row_start + threadIdx.x;
     const float *cur_box = dev_boxes + cur_box_idx * 5;
     int i = 0;
-    unsigned long long t = 0;
+    long int t = 0;
     int start = 0;
     if (row_start == col_start) {
       start = threadIdx.x + 1;
@@ -71,7 +71,7 @@ __global__ void nms_kernel(const int n_boxes, const float nms_overlap_thresh,
 
 
 void _nms(int boxes_num, float * boxes_dev,
-          unsigned long long * mask_dev, float nms_overlap_thresh) {
+          long int * mask_dev, float nms_overlap_thresh) {
 
   dim3 blocks(DIVUP(boxes_num, threadsPerBlock),
               DIVUP(boxes_num, threadsPerBlock));
