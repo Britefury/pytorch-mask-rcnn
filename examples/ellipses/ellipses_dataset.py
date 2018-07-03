@@ -128,57 +128,68 @@ def make_circle(n_verts):
                      np.sin(np.linspace(0.0, 2.0 * np.pi, n_verts))], axis=1)[:-1] * 0.5
 
 
+def _get_rng(rng):
+    if rng is None:
+        return np.random
+    elif isinstance(rng, int):
+        return np.random.RandomState(rng)
+    else:
+        return rng
 
-def random_object_matrices(n, image_size, rot_range, size_range, aspect_bound):
+
+def random_object_matrices(n, image_size, rot_range, size_range, aspect_bound, rng=None):
+    rng = _get_rng(rng)
     # Rotations
-    rotations = np.random.uniform(rot_range[0], rot_range[1], size=(n,))
+    rotations = rng.uniform(rot_range[0], rot_range[1], size=(n,))
 
     # Draw random aspect ratios, keeping area the same
     log_aspect_bound = np.log(aspect_bound) / 2
-    ratios = np.exp(np.random.uniform(-log_aspect_bound, log_aspect_bound, size=(n,)))
+    ratios = np.exp(rng.uniform(-log_aspect_bound, log_aspect_bound, size=(n,)))
     # Draw random sizes
-    sizes = np.exp(np.random.uniform(np.log(size_range[0]), np.log(size_range[1]), size=(n,)))
+    sizes = np.exp(rng.uniform(np.log(size_range[0]), np.log(size_range[1]), size=(n,)))
     scales = np.stack([sizes * ratios, sizes / ratios], axis=1)
 
     # Limit position to lie inside the image with a border whose size is the average object size
     pos_border = (size_range[0] + size_range[1]) * 0.5
     pos_x_range = pos_border, image_size[1] - pos_border
     pos_y_range = pos_border, image_size[0] - pos_border
-    pos = np.stack([np.random.uniform(pos_x_range[0], pos_x_range[1], size=(n,)),
-                    np.random.uniform(pos_y_range[0], pos_y_range[1], size=(n,))], axis=1)
+    pos = np.stack([rng.uniform(pos_x_range[0], pos_x_range[1], size=(n,)),
+                    rng.uniform(pos_y_range[0], pos_y_range[1], size=(n,))], axis=1)
     return cat_nx2x3(translation_matrices(pos), rotation_matrices(rotations), scale_matrices(scales), )
 
-def group_object_matrices(n, rot_range, base_scale, aspect_bound, pos_offset_range, pos_step):
+def group_object_matrices(n, rot_range, base_scale, aspect_bound, pos_offset_range, pos_step, rng=None):
+    rng = _get_rng(rng)
     # Rotations as before, except that the bounds passed will be tighter
-    rotations = np.random.uniform(rot_range[0], rot_range[1], size=(n,))
+    rotations = rng.uniform(rot_range[0], rot_range[1], size=(n,))
 
     # Draw random aspect rations (more constrained)
     log_aspect_range = np.log(aspect_bound) / 2
-    ratios = np.exp(np.random.uniform(-log_aspect_range, log_aspect_range, size=(n,)))
+    ratios = np.exp(rng.uniform(-log_aspect_range, log_aspect_range, size=(n,)))
     # Multiply by a base scale factor that provides the main contribution of aspect ratio
     scales = np.stack([base_scale[0] * ratios, base_scale[1] / ratios], axis=1)
 
     # Space the objects in the group equally along the X-axis, with some random perturbation
-    pos_x = (np.arange(n) - n // 2) * pos_step + np.random.uniform(-pos_offset_range, pos_offset_range, size=(n,))
-    pos_y = np.random.uniform(-pos_offset_range, pos_offset_range, size=(n,))
+    pos_x = (np.arange(n) - n // 2) * pos_step + rng.uniform(-pos_offset_range, pos_offset_range, size=(n,))
+    pos_y = rng.uniform(-pos_offset_range, pos_offset_range, size=(n,))
     pos = np.stack([pos_x, pos_y], axis=1)
     return cat_nx2x3(translation_matrices(pos), rotation_matrices(rotations), scale_matrices(scales), )
 
-def random_groups(n_groups, n_objects_per_group, image_size, rot_range, size_range, aspect_bound):
+def random_groups(n_groups, n_objects_per_group, image_size, rot_range, size_range, aspect_bound, rng=None):
+    rng = _get_rng(rng)
     # Random rotations
-    rotations = np.random.uniform(rot_range[0], rot_range[1], size=(n_groups,))
+    rotations = rng.uniform(rot_range[0], rot_range[1], size=(n_groups,))
 
     # Vary aspect ratio between -log_aspect_bound and -log_aspect_bound/2; tend to generate ellipses
     log_aspect_bound = np.log(aspect_bound) / 2
-    ratios = np.exp(np.random.uniform(-log_aspect_bound, -log_aspect_bound * 0.5, size=(n_groups,)))
+    ratios = np.exp(rng.uniform(-log_aspect_bound, -log_aspect_bound * 0.5, size=(n_groups,)))
     # Draw random object sizes
-    sizes = np.exp(np.random.uniform(np.log(size_range[0]), np.log(size_range[1]), size=(n_groups,)))
+    sizes = np.exp(rng.uniform(np.log(size_range[0]), np.log(size_range[1]), size=(n_groups,)))
     scales = np.stack([sizes * ratios, sizes / ratios], axis=1)
 
     # Compute the per-group step size, border and central position
     step_sizes = scales[:, 0]
     borders = step_sizes * (n_objects_per_group // 2)
-    pos = np.random.uniform(0.0, 1.0, size=(n_groups, 2))
+    pos = rng.uniform(0.0, 1.0, size=(n_groups, 2))
     pos = borders[:, None] + pos * (np.array(image_size)[None, :] - borders[:, None])
 
     # Compute per-group matrices
@@ -187,7 +198,7 @@ def random_groups(n_groups, n_objects_per_group, image_size, rot_range, size_ran
     all_m = []
     for g_i in range(len(group_m)):
         g_m = group_object_matrices(n_objects_per_group, (-np.radians(7.5), np.radians(7.5)),
-                                    scales[g_i], 1.2, sizes[g_i] * 0.15, step_sizes[g_i])
+                                    scales[g_i], 1.2, sizes[g_i] * 0.15, step_sizes[g_i], rng=rng)
         # Concatenate object matriecs with group matrix
         group_xf = np.repeat(group_m[g_i:g_i + 1], len(g_m), axis=0)
         all_m.append(cat_nx2x3_2(group_xf, g_m))
@@ -217,7 +228,9 @@ def label_hulls(labels):
 
 
 def make_sample(image_size, n_random_objects=20, n_groups=4, n_objs_per_group=7, size_range=(8.0, 12.5), aspect_bound=4.0,
-                n_circle_verts=65):
+                n_circle_verts=65, rng=None):
+    rng = _get_rng(rng)
+
     # Make circle polygon
     circle = make_circle(n_circle_verts)
 
@@ -226,19 +239,19 @@ def make_sample(image_size, n_random_objects=20, n_groups=4, n_objs_per_group=7,
     # QHull will generate errors if the object is degenerate or in some other circumstances.
     # In these situations, generate another random image
     while draw_objects:
-        obj_ms = random_object_matrices(n_random_objects, image_size=image_size, rot_range=(-np.pi * 0.5, np.pi * 0.5),
-                                        size_range=size_range, aspect_bound=aspect_bound)
         group_ms = random_groups(n_groups, n_objs_per_group, image_size=image_size, rot_range=(-np.pi * 0.5, np.pi * 0.5),
-                                 size_range=size_range, aspect_bound=aspect_bound)
-        m = np.append(obj_ms, group_ms, axis=0)
+                                 size_range=size_range, aspect_bound=aspect_bound, rng=rng)
+        obj_ms = random_object_matrices(n_random_objects, image_size=image_size, rot_range=(-np.pi * 0.5, np.pi * 0.5),
+                                        size_range=size_range, aspect_bound=aspect_bound, rng=rng)
+        m = np.append(group_ms, obj_ms, axis=0)
 
-        rgb_img = Image.new('RGB', image_size)
-        label_img = Image.new('I', image_size)
+        rgb_img = Image.new('RGB', image_size[::-1])
+        label_img = Image.new('I', image_size[::-1])
         rgb_draw = ImageDraw(rgb_img)
         label_draw = ImageDraw(label_img)
 
         for i in range(len(m)):
-            colour = tuple(np.random.randint(127, 255, (3,)).astype(np.uint8).tolist())
+            colour = tuple(rng.randint(127, 255, (3,)).astype(np.uint8).tolist())
             p = transform_points(m[i], circle)
             rgb_draw.polygon([tuple(v) for v in p.tolist()], fill=tuple(colour))
             label_draw.polygon([tuple(v) for v in p.tolist()], fill=i + 1)
