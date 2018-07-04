@@ -872,7 +872,7 @@ class AbstractMaskRCNNModel (FasterRCNNBaseModel):
             # mrcnn_mask_block_cls: [batch, detection_index, mask_height, mask_width]
             mrcnn_mask.append(mrcnn_mask_block_cls)
 
-        mrcnn_mask = torch.cat(mrcnn_mask, axis=1)
+        mrcnn_mask = torch.cat(mrcnn_mask, dim=1)
 
         return mrcnn_mask
 
