@@ -100,7 +100,7 @@ def experiment(dataset, backbone, head, learning_rate, pretrained_lr_factor,
 
     # Set up logging
     try:
-        log = logging.Logger(log_file, os.path.join('results', 'log_eval_mrcnn.txt'))
+        log = logging.Logger(log_file, os.path.join('logs', 'log_smallobject_{}_{}.txt'.format(dataset, head)))
     except logging.LogFileAlreadyExists:
         print('Output log file {} already exists'.format(log_file))
         return
