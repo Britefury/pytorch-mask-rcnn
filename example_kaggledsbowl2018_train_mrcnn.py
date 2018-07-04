@@ -697,7 +697,7 @@ def experiment(dataset, backbone, head, learning_rate, pretrained_lr_factor,
             else:
                 print('Predicted test images in {:.3f}s'.format(t2 - t1))
 
-    else:
+    elif head == 'rpn':
         def inference_on_test_set(output_dir, eval_predictions):
             if output_dir is not None:
                 os.makedirs(output_dir, exist_ok=True)
@@ -709,6 +709,7 @@ def experiment(dataset, backbone, head, learning_rate, pretrained_lr_factor,
             for i in test_indices:
                 i = int(i)
                 det_boxes, det_scores = predict_image(d_test.X[i])
+                det_boxes = det_boxes[det_scores >= 0.5][None, ...]
 
                 if output_dir is not None:
                     pred_path = os.path.join(output_dir, '{}.npz'.format(d_test.names[i]))
@@ -727,6 +728,9 @@ def experiment(dataset, backbone, head, learning_rate, pretrained_lr_factor,
                     t2 - t1, np.mean(accs), np.mean(n_dets), np.mean(n_reals)))
             else:
                 print('Predicted test images in {:.3f}s'.format(t2 - t1))
+
+    else:
+        raise RuntimeError
 
     # Report setttings
     log('Command line:')
