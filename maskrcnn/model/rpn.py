@@ -532,7 +532,7 @@ def compute_rpn_losses_per_sample(config, rpn_pred_class_logits, rpn_pred_bbox, 
             if n_pos > 0:
                 sample_rpn_bbox = rpn_pred_bbox[sample_i, pos_indices[:, 0]]
                 sample_pos_target_box = rpn_target_bbox[sample_i, :n_pos, :]
-                box_weight = torch.ones(sample_class_logits.shape[0], dtype=torch.float, device=device)
+                box_weight = torch.ones(sample_rpn_bbox.shape[0], dtype=torch.float, device=device)
             else:
                 sample_rpn_bbox = sample_pos_target_box = None
                 box_weight = None

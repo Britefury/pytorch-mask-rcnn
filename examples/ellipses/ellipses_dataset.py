@@ -8,9 +8,11 @@ from scipy.spatial.qhull import QhullError
 from skimage.util import img_as_float
 
 from examples.affine_transforms import *
+from examples import settings
 
 
-
+def _get_ellipses_root_dir(exists=True):
+    return settings.get_config_dir('ellipses_root', exists=exists)
 
 
 def make_circle(n_verts):
@@ -117,8 +119,8 @@ def label_hulls(labels):
     return sample_convex_hulls
 
 
-def make_sample(image_size, n_random_objects=20, n_groups=4, n_objs_per_group=7, size_range=(8.0, 12.5), aspect_bound=4.0,
-                n_circle_verts=65, rng=None):
+def make_sample(image_size, n_random_objects=20, n_groups=4, n_objs_per_group=7, size_range=(10.0, 16.0),
+                aspect_bound=4.0, n_circle_verts=65, rng=None):
     rng = _get_rng(rng)
 
     # Make circle polygon
@@ -187,12 +189,24 @@ class EllipsesDataset (object):
                 return xs
 
 
-    def __init__(self, root_dir, n_images, range01, rgb_order):
+    def __init__(self, root_dir, range01=True, rgb_order=True):
         self.root_dir = root_dir
-        self.n_images = n_images
 
-        self.rgb_paths = [os.path.join(root_dir, 'rgb_{:06d}.png'.format(i)) for i in range(n_images)]
-        self.label_paths = [os.path.join(root_dir, 'labels_{:06d}.png'.format(i)) for i in range(n_images)]
+        self.n_images = 0
+        self.rgb_paths = []
+        self.label_paths = []
+
+        # Find the images
+        while True:
+            rgb_path = os.path.join(root_dir, 'rgb_{:06d}.png'.format(self.n_images))
+            label_path = os.path.join(root_dir, 'labels_{:06d}.png'.format(self.n_images))
+            if os.path.exists(rgb_path) and os.path.exists(label_path):
+                self.rgb_paths.append(rgb_path)
+                self.label_paths.append(label_path)
+            else:
+                break
+            self.n_images += 1
+
         with open(os.path.join(root_dir, 'convex_hulls.pkl'), 'rb') as f_hulls:
             self.hulls = pickle.load(f_hulls)
 
@@ -221,3 +235,18 @@ class EllipsesDataset (object):
     def load_label_image(self, path):
         img = Image.open(path)
         return np.array(img)
+
+
+
+class EllipsesTrainDataset (EllipsesDataset):
+    def __init__(self, range01=True, rgb_order=True):
+        super(EllipsesTrainDataset, self).__init__(
+            os.path.join(_get_ellipses_root_dir(), 'train'), range01=range01, rgb_order=rgb_order
+        )
+
+class EllipsesTestDataset (EllipsesDataset):
+    def __init__(self, range01=True, rgb_order=True):
+        super(EllipsesTestDataset, self).__init__(
+            os.path.join(_get_ellipses_root_dir(), 'test'), range01=range01, rgb_order=rgb_order
+        )
+

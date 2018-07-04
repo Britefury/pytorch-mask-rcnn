@@ -1,11 +1,11 @@
 import click
 
 @click.command()
-@click.argument('path', type=click.Path(file_okay=False, dir_okay=True))
+@click.option('--path', type=click.Path(file_okay=False, dir_okay=True))
 @click.option('--n_train', type=int, default=32)
 @click.option('--n_test', type=int, default=32)
-@click.option('--width', type=int, default=192)
-@click.option('--height', type=int, default=192)
+@click.option('--width', type=int, default=256)
+@click.option('--height', type=int, default=256)
 def create_ellipses(path, n_train, n_test, width, height):
     import os
     import tqdm
@@ -32,6 +32,9 @@ def create_ellipses(path, n_train, n_test, width, height):
 
         with open(os.path.join(out_path, 'convex_hulls.pkl'), 'wb') as f_hulls:
             pickle.dump(hulls, f_hulls)
+
+    if path is None:
+        path = ellipses_dataset._get_ellipses_root_dir(exists=False)
 
     if n_train > 0:
         train_dir = os.path.join(path, 'train')

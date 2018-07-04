@@ -172,8 +172,8 @@ def experiment(dataset, backbone, head, learning_rate, pretrained_lr_factor,
         else:
             train_indices, test_indices = next(splitter.split(d_train.cls, d_train.cls))
     elif dataset == 'ellipses':
-        d_train = ellipses_dataset.EllipsesDataset()
-        d_test = ellipses_dataset.EllipsesDataset()
+        d_train = ellipses_dataset.EllipsesTrainDataset()
+        d_test = ellipses_dataset.EllipsesTestDataset()
 
         train_indices = np.arange(len(d_train.X))
         test_indices = np.arange(len(d_test.X))

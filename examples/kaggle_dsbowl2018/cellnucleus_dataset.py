@@ -1,5 +1,4 @@
 import os
-import sys
 import pickle
 import numpy as np
 import tqdm
@@ -9,41 +8,7 @@ from matplotlib import pyplot as plt
 from PIL import Image
 from skimage.util import img_as_float, img_as_ubyte
 from skimage.color import grey2rgb
-
-if sys.version_info[0] == 2:  # pragma: no cover
-    from ConfigParser import RawConfigParser
-else:
-    from configparser import RawConfigParser
-
-
-
-_CONFIG_PATH = './dsbowl2018.cfg'
-
-_config__ = None
-
-def get_config():  # pragma: no cover
-    global _config__
-    if _config__ is None:
-        if os.path.exists(_CONFIG_PATH):
-            try:
-                _config__ = RawConfigParser()
-                _config__.read(_CONFIG_PATH)
-            except Exception as e:
-                print('WARNING: error {} trying to open config '
-                      'file from {}'.format(e, _CONFIG_PATH))
-                _config__ = RawConfigParser()
-        else:
-            _config__ = RawConfigParser()
-    return _config__
-
-
-def get_config_dir(name):  # pragma: no cover
-    dir_path = get_config().get('paths', name)
-    if not os.path.exists(dir_path):
-        raise RuntimeError(
-            'kaggle-cellnucleus.settings: the directory path {} does not exist'.format(dir_path))
-    return dir_path
-
+from examples import settings
 
 def _rgb_path(ds_dir, sample_name):
     return os.path.join(ds_dir, sample_name, 'images', '{}.png'.format(sample_name))
@@ -51,6 +16,9 @@ def _rgb_path(ds_dir, sample_name):
 def _labels_path(ds_dir, sample_name):
     return os.path.join(ds_dir, sample_name, 'labels.png')
 
+
+def _get_dsbowl_root_dir():
+    return settings.get_config_dir('kaggle_dsbowl2018_root')
 
 class CellNucleusSegDataset (object):
     class ImageAccessor (object):
@@ -188,7 +156,7 @@ class CellNucleusSegDataset (object):
 
 class Stage1TrainSegDataset (CellNucleusSegDataset):
     def __init__(self, range01=True, rgb_order=True, dummy=False, subset_indices=None, exclude_errors=True):
-        root_dir = os.path.join(get_config_dir('data_root'), 'stage1_train')
+        root_dir = os.path.join(_get_dsbowl_root_dir(), 'stage1_train')
         manifest_path = os.path.join(root_dir, 'exp_cls.pkl')
 
         if exclude_errors:
@@ -223,7 +191,7 @@ class Stage1TrainSegDataset (CellNucleusSegDataset):
 
 class Stage1TestSegDataset (CellNucleusSegDataset):
     def __init__(self, range01=True, rgb_order=True, dummy=False, subset_indices=None):
-        root_dir = os.path.join(get_config_dir('data_root'), 'stage1_test')
+        root_dir = os.path.join(_get_dsbowl_root_dir(), 'stage1_test')
 
         filenames = os.listdir(root_dir)
         sample_names = []
@@ -250,7 +218,7 @@ class Stage1TestSegDataset (CellNucleusSegDataset):
 
 class Stage1TrainTestSegDataset (CellNucleusSegDataset):
     def __init__(self, range01=True, rgb_order=True, dummy=False, subset_indices=None):
-        root_dir = os.path.join(get_config_dir('data_root'), 'stage1_traintest')
+        root_dir = os.path.join(_get_dsbowl_root_dir(), 'stage1_traintest')
 
         filenames = os.listdir(root_dir)
         sample_names = []
@@ -277,7 +245,7 @@ class Stage1TrainTestSegDataset (CellNucleusSegDataset):
 
 class Stage2TestSegDataset (CellNucleusSegDataset):
     def __init__(self, range01=True, rgb_order=True, dummy=False, subset_indices=None):
-        root_dir = os.path.join(get_config_dir('data_root'), 'stage2_test')
+        root_dir = os.path.join(_get_dsbowl_root_dir(), 'stage2_test')
 
         filenames = os.listdir(root_dir)
         sample_names = []
