@@ -6,7 +6,8 @@ import click
 @click.option('--n_test', type=int, default=32)
 @click.option('--width', type=int, default=256)
 @click.option('--height', type=int, default=256)
-def create_ellipses(path, n_train, n_test, width, height):
+@click.option('--seed', type=int, default=12345)
+def create_ellipses(path, n_train, n_test, width, height, seed):
     import os
     import tqdm
     import pickle
@@ -16,12 +17,14 @@ def create_ellipses(path, n_train, n_test, width, height):
 
     image_size = height, width
 
-    def generate_samples(out_path, n_samples):
+    rng = np.random.RandomState(seed)
+
+    def generate_samples(out_path, n_samples, rng):
         hulls = []
 
         # Generate data
         for i in tqdm.tqdm(list(range(n_samples))):
-            x, y, hulls_i = ellipses_dataset.make_sample(image_size)
+            x, y, hulls_i = ellipses_dataset.make_sample(image_size, rng=rng)
 
             rgb_path = os.path.join(out_path, 'rgb_{:06d}.png'.format(i))
             labels_path = os.path.join(out_path, 'labels_{:06d}.png'.format(i))
@@ -36,15 +39,15 @@ def create_ellipses(path, n_train, n_test, width, height):
     if path is None:
         path = ellipses_dataset._get_ellipses_root_dir(exists=False)
 
-    if n_train > 0:
-        train_dir = os.path.join(path, 'train')
-        os.makedirs(train_dir, exist_ok=True)
-        generate_samples(train_dir, n_train)
-
     if n_test > 0:
         test_dir = os.path.join(path, 'test')
         os.makedirs(test_dir, exist_ok=True)
-        generate_samples(test_dir, n_test)
+        generate_samples(test_dir, n_test, rng)
+
+    if n_train > 0:
+        train_dir = os.path.join(path, 'train')
+        os.makedirs(train_dir, exist_ok=True)
+        generate_samples(train_dir, n_train, rng)
 
 
 if __name__ == '__main__':

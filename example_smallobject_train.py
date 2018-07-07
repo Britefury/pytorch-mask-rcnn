@@ -692,7 +692,7 @@ def experiment(dataset, backbone, head, learning_rate, pretrained_lr_factor,
 
             t2 = time.time()
             if eval_predictions and d_test.y is not None:
-                log('Predicted test images in {:.3f}s: acc={:.6%} (avg dets={:.6f}, avs reals={:.6f})'.format(
+                log('Predicted test images in {:.3f}s: acc={:.6%} (avg dets={:.6f}, avg reals={:.6f})'.format(
                     t2 - t1, np.mean(accs), np.mean(n_dets), np.mean(n_reals)))
             else:
                 print('Predicted test images in {:.3f}s'.format(t2 - t1))
@@ -724,7 +724,7 @@ def experiment(dataset, backbone, head, learning_rate, pretrained_lr_factor,
 
             t2 = time.time()
             if eval_predictions and d_test.y is not None:
-                log('Predicted test images in {:.3f}s: acc={:.6%} (avg dets={:.6f}, avs reals={:.6f})'.format(
+                log('Predicted test images in {:.3f}s: acc={:.6%} (avg dets={:.6f}, avg reals={:.6f})'.format(
                     t2 - t1, np.mean(accs), np.mean(n_dets), np.mean(n_reals)))
             else:
                 print('Predicted test images in {:.3f}s'.format(t2 - t1))
