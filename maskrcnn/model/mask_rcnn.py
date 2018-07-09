@@ -830,51 +830,54 @@ class AbstractMaskRCNNModel (FasterRCNNBaseModel):
         """
         device = det_boxes.device
 
-        # Convert boxes to normalized coordinates for mask generation
-        h, w = image_size
-        scale = torch.tensor(np.array([h, w, h, w]), dtype=torch.float, device=device)
-        det_boxes_nrm = det_boxes / scale[None, None, :]
+        if det_boxes.shape[0] == 0:
+            return torch.zeros([0], dtype=torch.float, device=device)
+        else:
+            # Convert boxes to normalized coordinates for mask generation
+            h, w = image_size
+            scale = torch.tensor(np.array([h, w, h, w]), dtype=torch.float, device=device)
+            det_boxes_nrm = det_boxes / scale[None, None, :]
 
-        # Generate masks
-        mrcnn_mask = []
+            # Generate masks
+            mrcnn_mask = []
 
-        # Processing a large number of detections can use significant amounts of memory as the
-        # pyramid-roi-align step would need to generate a large number of feature maps
-        # to feed into the mask head and the convolutional layers in the mask head add additional load.
-        # To reduce this, process at most `self.config.DETECTION_BLOCK_SIZE_INFERENCE` detections
-        # per sample at a time.
-        for mask_i in range(0, det_boxes_nrm.size()[1], self.config.DETECTION_BLOCK_SIZE_INFERENCE):
-            mask_j = min(mask_i + self.config.DETECTION_BLOCK_SIZE_INFERENCE, det_boxes_nrm.size()[1])
+            # Processing a large number of detections can use significant amounts of memory as the
+            # pyramid-roi-align step would need to generate a large number of feature maps
+            # to feed into the mask head and the convolutional layers in the mask head add additional load.
+            # To reduce this, process at most `self.config.DETECTION_BLOCK_SIZE_INFERENCE` detections
+            # per sample at a time.
+            for mask_i in range(0, det_boxes_nrm.size()[1], self.config.DETECTION_BLOCK_SIZE_INFERENCE):
+                mask_j = min(mask_i + self.config.DETECTION_BLOCK_SIZE_INFERENCE, det_boxes_nrm.size()[1])
 
-            n_dets_per_sample_block = [
-                min(mask_j, n_dets) - min(mask_i, n_dets) for n_dets in n_dets_per_sample
-            ]
+                n_dets_per_sample_block = [
+                    min(mask_j, n_dets) - min(mask_i, n_dets) for n_dets in n_dets_per_sample
+                ]
 
-            # The pyramid_roi_align function will trim away unused detection boxes (zero padding),
-            # so the mask head won't waste resources.
-            # The mask head will also convert the resulting mask predictions to a [sample, detection, ...]
-            # shape with zero padding
-            mrcnn_mask_block = self.mask(mrcnn_feature_maps, det_boxes_nrm[:, mask_i:mask_j, ...],
-                                         n_dets_per_sample_block, image_size)
-            # mrcnn_mask_block: [batch, detection_index, object_class, height, width] with zero padding in dim1
+                # The pyramid_roi_align function will trim away unused detection boxes (zero padding),
+                # so the mask head won't waste resources.
+                # The mask head will also convert the resulting mask predictions to a [sample, detection, ...]
+                # shape with zero padding
+                mrcnn_mask_block = self.mask(mrcnn_feature_maps, det_boxes_nrm[:, mask_i:mask_j, ...],
+                                             n_dets_per_sample_block, image_size)
+                # mrcnn_mask_block: [batch, detection_index, object_class, height, width] with zero padding in dim1
 
-            det_class_ids_block = det_class_ids[:, mask_i:mask_j]
+                det_class_ids_block = det_class_ids[:, mask_i:mask_j]
 
-            mrcnn_mask_block = mrcnn_mask_block.detach()
+                mrcnn_mask_block = mrcnn_mask_block.detach()
 
-            batch_det = mrcnn_mask_block.shape[0] * mrcnn_mask_block.shape[1]
-            masks_bd = mrcnn_mask_block.view(batch_det, *mrcnn_mask_block.shape[2:])
-            cls_ids_bd = det_class_ids_block.view(batch_det)
-            masks_cls_bd = masks_bd[torch.arange(batch_det, dtype=torch.long), cls_ids_bd, ...]
-            mrcnn_mask_block_cls = masks_cls_bd.view(mrcnn_mask_block.shape[0], mrcnn_mask_block.shape[1],
-                                                     mrcnn_mask_block.shape[3], mrcnn_mask_block.shape[4])
+                batch_det = mrcnn_mask_block.shape[0] * mrcnn_mask_block.shape[1]
+                masks_bd = mrcnn_mask_block.view(batch_det, *mrcnn_mask_block.shape[2:])
+                cls_ids_bd = det_class_ids_block.view(batch_det)
+                masks_cls_bd = masks_bd[torch.arange(batch_det, dtype=torch.long), cls_ids_bd, ...]
+                mrcnn_mask_block_cls = masks_cls_bd.view(mrcnn_mask_block.shape[0], mrcnn_mask_block.shape[1],
+                                                         mrcnn_mask_block.shape[3], mrcnn_mask_block.shape[4])
 
-            # mrcnn_mask_block_cls: [batch, detection_index, mask_height, mask_width]
-            mrcnn_mask.append(mrcnn_mask_block_cls)
+                # mrcnn_mask_block_cls: [batch, detection_index, mask_height, mask_width]
+                mrcnn_mask.append(mrcnn_mask_block_cls)
 
-        mrcnn_mask = torch.cat(mrcnn_mask, dim=1)
+            mrcnn_mask = torch.cat(mrcnn_mask, dim=1)
 
-        return mrcnn_mask
+            return mrcnn_mask
 
 
     def detect_forward(self, images, image_windows, override_class=None):
