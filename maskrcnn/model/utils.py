@@ -388,16 +388,14 @@ def box_refinement(box, gt_box):
 #  Plotting Utility Functions
 ############################################################
 
-def plot_image_with_boxes(ax, img, boxes, alpha=1.0, colours=None):
-    ax.imshow(img)
+def plot_boxes(ax, boxes, alpha=1.0, colours=None):
     if colours is None:
         colours = ['red'] * len(boxes)
     for (y1, x1, y2, x2), col in zip(boxes, colours):
         rect = Rectangle((x1, y1), x2-x1, y2-y1, facecolor=None, edgecolor=col, fill=False, alpha=alpha)
         ax.add_patch(rect)
 
-def plot_image_with_stratified_boxes(ax, img, boxes, alpha=1.0, colour='red'):
-    ax.imshow(img)
+def plot_stratified_boxes(ax, boxes, alpha=1.0, colour='red'):
     for group in boxes:
         group_colour = group.get('colour', colour)
         group_alpha = group.get('alpha', alpha)
