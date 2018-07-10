@@ -53,6 +53,7 @@ import click
 @click.option('--seed', type=int, default=0, help='random seed (0 for time-based)')
 @click.option('--log_file', type=str, default='', help='log file path (none to disable)')
 @click.option('--model_file', type=str, default='', help='path to file to save model to')
+@click.option('--plot_dir', type=str, default='', help='plot detections directory name')
 @click.option('--predictions_dir', type=str, default='', help='predictions directory name')
 @click.option('--prediction_every_n_epochs', type=int, default=-1, help='generate predictions every n epochs')
 @click.option('--eval_every_n_epochs', type=int, default=10, help='evaluate predictions every n epochs')
@@ -73,7 +74,7 @@ def experiment(dataset, backbone, head, learning_rate, pretrained_lr_factor,
                light_scl_std, light_off_std,
                img_pad_mode, standardisation, invert,
                batch_size, num_epochs, seed,
-               log_file, model_file, predictions_dir,
+               log_file, model_file, plot_dir, predictions_dir,
                prediction_every_n_epochs, eval_every_n_epochs, save_model_every_n_epochs,
                hide_progress_bar,
                subsetseed, exp_classes, device, num_threads):
@@ -125,16 +126,15 @@ def experiment(dataset, backbone, head, learning_rate, pretrained_lr_factor,
     from examples import augmentation, affine_transforms, affine_torch, inference
     from examples import smallobj_network_architectures
     from PIL import Image
-    import scipy.misc
-    import skimage.transform
-    from skimage.measure import regionprops
+    from matplotlib import pyplot as plt
     from sklearn.model_selection import ShuffleSplit, StratifiedShuffleSplit
     import torch, torch.cuda
     from torch import nn
     from torch.nn import functional as F
     from torch.optim import lr_scheduler
     from maskrcnn.model import mask_rcnn, rcnn, rpn
-    from maskrcnn.model.utils import concatenate_detection_arrays
+    from maskrcnn.model.utils import concatenate_detection_arrays, plot_boxes, visualise_labels
+    from examples.ground_truths import label_image_to_gt
     import cv2
 
     if hide_progress_bar:
@@ -184,7 +184,10 @@ def experiment(dataset, backbone, head, learning_rate, pretrained_lr_factor,
 
     torch_device = torch.device('cuda', device)
 
-    pool = work_pool.WorkerThreadPool(num_threads)
+    if num_threads > 0:
+        pool = work_pool.WorkerThreadPool(num_threads)
+    else:
+        pool = None
 
     n_chn = 0
 
@@ -257,8 +260,8 @@ def experiment(dataset, backbone, head, learning_rate, pretrained_lr_factor,
             raise RuntimeError
 
         # Crop out a region for training
-        pad_axis_0, crop_axis_0 = augmentation.random_shift(labels.shape[0], crop_border, fixed_size)
-        pad_axis_1, crop_axis_1 = augmentation.random_shift(labels.shape[1], crop_border, fixed_size)
+        pad_axis_0, crop_axis_0, offset_axis_0 = augmentation.random_shift(labels.shape[0], crop_border, fixed_size)
+        pad_axis_1, crop_axis_1, offset_axis_1 = augmentation.random_shift(labels.shape[1], crop_border, fixed_size)
 
         x = np.pad(x, [pad_axis_0, pad_axis_1, (0, 0)], mode='constant')
         labels = np.pad(labels, [pad_axis_0, pad_axis_1], mode='constant')
@@ -302,51 +305,38 @@ def experiment(dataset, backbone, head, learning_rate, pretrained_lr_factor,
         labels_aug = cv2.warpAffine(labels, xf_cv[0], labels.shape[:2][::-1], flags=cv2.INTER_NEAREST)
 
         # Extract instance masks and boxes
-        rprops = regionprops(labels_aug)
-        gt_boxes = []
-        gt_masks = []
-        for label_i, rp in enumerate(rprops):
-            m = labels_aug == (label_i + 1)
-            horizontal_indicies = np.where(np.any(m, axis=0))[0]
-            vertical_indicies = np.where(np.any(m, axis=1))[0]
-            if horizontal_indicies.shape[0] > 0 and vertical_indicies.shape[0] > 0:
-                x1, x2 = horizontal_indicies[[0, -1]]
-                y1, y2 = vertical_indicies[[0, -1]]
-                # x2 and y2 should not be part of the box. Increment by 1.
-                x2 += 1
-                y2 += 1
+        gt_boxes, gt_masks = label_image_to_gt(labels_aug, image_size, mini_mask_shape=net.config.MINI_MASK_SHAPE,
+                                               box_border=box_border, box_border_min=box_border_min)
 
-                if box_border > 0.0 or box_border_min > 0:
-                    # Grow box
-                    h = float(y2 - y1)
-                    w = float(x2 - x1)
-                    y_border = max(int(round(h * box_border * 0.5)), box_border_min)
-                    x_border = max(int(round(w * box_border * 0.5)), box_border_min)
+        # plt.figure(figsize=(8, 8))
+        # ax = plt.subplot(1, 1, 1)
+        # ax.imshow(np.clip(x * 0.1 + 0.5, 0.0, 1.0))
+        # plot_boxes(ax, gt_boxes, alpha=0.8)
+        # plt.show()
 
-                    y1 = max(y1 - y_border, 0)
-                    x1 = max(x1 - x_border, 0)
-                    y2 = min(y2 + y_border, image_size[0])
-                    x2 = min(x2 + x_border, image_size[1])
-
-                if y2 > y1 and x2 > x1:
-                    mask = m[y1:y2, x1:x2].astype(float)
-                    mask = skimage.transform.resize(mask, net.config.MINI_MASK_SHAPE, order=1,
-                                                    mode='constant')
-                    mask = (mask >= 0.5).astype(np.float32)
-                    gt_boxes.append(np.array([y1, x1, y2, x2]))
-                    gt_masks.append(mask)
-        if len(gt_boxes) > 0:
-            gt_boxes = np.stack(gt_boxes, axis=0)
-            gt_masks = np.stack(gt_masks, axis=0)
-        else:
-            gt_boxes = np.zeros((0, 4))
-            gt_masks = np.zeros((0,) + net.config.MINI_MASK_SHAPE)
+        # plt.figure(figsize=(8,8))
+        # plt.imshow(montage2d(gt_masks), cmap='gray', vmin=0, vmax=1)
+        # plt.show()
 
         # Ground truth class IDs; all 1
         gt_class_ids = np.ones((len(gt_boxes),), dtype=int)
 
         # Convert boxes to RPN targets
         rpn_match, rpn_bbox, num_positives = net.ground_truth_to_rpn_targets(x.shape[:2], gt_class_ids, gt_boxes)
+
+        # anchors, valid_mask = net.config.ANCHOR_CACHE.get_anchors_and_valid_masks_for_image_shape(x.shape[:2])
+        # plt.figure(figsize=(8, 8))
+        # pos_anchors = anchors[rpn_match == 1, :5]
+        # pos_deltas = rpn_bbox[rpn_match == 1, :5]
+        # pos_deltas = pos_deltas * net.config.bbox_std_dev
+        # pos_boxes = np.zeros_like(pos_anchors)
+        # pos_boxes[:, :2] = pos_anchors[:, :2] + pos_anchors[:, 2:4] * pos_deltas[:, :2]
+        # pos_boxes[:, 2:4] = pos_anchors[:, 2:4] * np.exp(pos_deltas[:, 2:4])
+        # pos_boxes[:, 4:5] = pos_anchors[:, 4:5] + pos_deltas[:, 4:5]
+        # ax = plt.subplot(1, 1, 1)
+        # ax.imshow(np.clip(x * 0.1 + 0.5, 0.0, 1.0))
+        # plot_boxes(ax, pos_boxes, alpha=0.8)
+        # plt.show()
 
         # Convert everything to tensors of the approproate size
         x = x.transpose(2, 0, 1)[None, ...].astype(np.float32)
@@ -635,39 +625,59 @@ def experiment(dataset, backbone, head, learning_rate, pretrained_lr_factor,
         return f_pred_single(x, image_size)
 
     if head == 'mask_rcnn':
-        def inference_on_test_set(output_dir, eval_predictions):
+        def inference_on_test_set(output_dir, eval_predictions, epoch):
             if output_dir is not None:
                 os.makedirs(output_dir, exist_ok=True)
             net.eval()
             t1 = time.time()
             precs = []
+            n_dets = []
+            n_reals = []
+            if plot_dir != '':
+                os.makedirs(plot_dir, exist_ok=True)
             for i in test_indices:
                 i = int(i)
                 det_boxes, det_scores, det_class_ids, mrcnn_mask, labels, cls_map = predict_image(d_test.X[i])
 
+                if plot_dir != '':
+                    plot_path = os.path.join(plot_dir, 'segmentation_{:04d}_epoch{:04d}.png'.format(i, epoch))
+                    plt.figure(figsize=(7, 7))
+                    ax = plt.subplot(1, 1, 1)
+                    ax.imshow(visualise_labels(d_test.X[i], labels, mark_edges=True))
+                    plot_boxes(ax, det_boxes[0])
+                    plt.savefig(plot_path)
+                    plt.close()
+
                 if output_dir is not None:
-                    pred_path = os.path.join(output_dir, '{}.npz'.format(d_test.names[i]))
+                    if hasattr(d_test, 'names'):
+                        sample_name = d_test.names[i]
+                    else:
+                        sample_name = 'sample{:04d}'.format(i)
+                    pred_path = os.path.join(output_dir, '{}.npz'.format(sample_name))
                     np.savez_compressed(pred_path, det_scores=det_scores, det_class_ids=det_class_ids, det_boxes=det_boxes,
                                         mrcnn_mask=mrcnn_mask, labels=labels, cls_map=cls_map)
 
-                    labels_path = os.path.join(output_dir, '{}_labels.png'.format(d_test.names[i]))
+                    labels_path = os.path.join(output_dir, '{}_labels.png'.format(sample_name))
                     Image.fromarray(labels.astype(np.uint32)).save(labels_path)
 
-                    clsmap_path = os.path.join(output_dir, '{}_cls.png'.format(d_test.names[i]))
+                    clsmap_path = os.path.join(output_dir, '{}_cls.png'.format(sample_name))
                     Image.fromarray(cls_map.astype(np.uint32)).save(clsmap_path)
 
                 if eval_predictions and d_test.y is not None:
+                    n_reals.append(len(d_test.convex_hulls[i]) - 1)
+                    n_dets.append(len(det_boxes[0]))
                     prec = inference.mean_precision(d_test.y[i], labels)
                     precs.append(prec)
 
             t2 = time.time()
             if eval_predictions and d_test.y is not None:
-                log('Predicted test images in {:.3f}s: mean precision = {:.3%}'.format(t2 - t1, np.mean(precs)))
+                log('Predicted test images in {:.3f}s: mean precision = {:.3%} (avg dets={:.6f}, avg reals={:.6f})'.format(
+                    t2 - t1, np.mean(precs), np.mean(n_dets), np.mean(n_reals)))
             else:
                 print('Predicted test images in {:.3f}s'.format(t2 - t1))
 
     elif head == 'faster_rcnn':
-        def inference_on_test_set(output_dir, eval_predictions):
+        def inference_on_test_set(output_dir, eval_predictions, epoch):
             if output_dir is not None:
                 os.makedirs(output_dir, exist_ok=True)
             net.eval()
@@ -675,9 +685,20 @@ def experiment(dataset, backbone, head, learning_rate, pretrained_lr_factor,
             accs = []
             n_dets = []
             n_reals = []
+            if plot_dir != '':
+                os.makedirs(plot_dir, exist_ok=True)
             for i in test_indices:
                 i = int(i)
                 det_boxes, det_scores, det_class_ids = predict_image(d_test.X[i])
+
+                if plot_dir != '':
+                    plot_path = os.path.join(plot_dir, 'detections_{:04d}_epoch{:04d}.png'.format(i, epoch))
+                    plt.figure(figsize=(7, 7))
+                    ax = plt.subplot(1, 1, 1)
+                    ax.imshow(d_test.X[i])
+                    plot_boxes(ax, det_boxes[0])
+                    plt.savefig(plot_path)
+                    plt.close()
 
                 if output_dir is not None:
                     pred_path = os.path.join(output_dir, '{}.npz'.format(d_test.names[i]))
@@ -698,7 +719,7 @@ def experiment(dataset, backbone, head, learning_rate, pretrained_lr_factor,
                 print('Predicted test images in {:.3f}s'.format(t2 - t1))
 
     elif head == 'rpn':
-        def inference_on_test_set(output_dir, eval_predictions):
+        def inference_on_test_set(output_dir, eval_predictions, epoch):
             if output_dir is not None:
                 os.makedirs(output_dir, exist_ok=True)
             net.eval()
@@ -706,10 +727,21 @@ def experiment(dataset, backbone, head, learning_rate, pretrained_lr_factor,
             accs = []
             n_dets = []
             n_reals = []
+            if plot_dir != '':
+                os.makedirs(plot_dir, exist_ok=True)
             for i in test_indices:
                 i = int(i)
                 det_boxes, det_scores = predict_image(d_test.X[i])
                 det_boxes = det_boxes[det_scores >= 0.5][None, ...]
+
+                if plot_dir != '':
+                    plot_path = os.path.join(plot_dir, 'detections_{:04d}_epoch{:04d}.png'.format(i, epoch))
+                    plt.figure(figsize=(7, 7))
+                    ax = plt.subplot(1, 1, 1)
+                    ax.imshow(d_test.X[i])
+                    plot_boxes(ax, det_boxes[0])
+                    plt.savefig(plot_path)
+                    plt.close()
 
                 if output_dir is not None:
                     pred_path = os.path.join(output_dir, '{}.npz'.format(d_test.names[i]))
@@ -751,7 +783,8 @@ def experiment(dataset, backbone, head, learning_rate, pretrained_lr_factor,
     train_ds = data_source.ArrayDataSource([d_train.X, d_train.y], repeats=-1,
                                            indices=train_indices)
     train_ds = train_ds.map(_prepare_training_batch)
-    train_ds = pool.parallel_data_source(train_ds, batch_buffer_size=min(20, n_train_batches))
+    if pool is not None:
+        train_ds = pool.parallel_data_source(train_ds, batch_buffer_size=min(20, n_train_batches))
 
     if seed != 0:
         shuffle_rng = np.random.RandomState(seed)
@@ -802,7 +835,7 @@ def experiment(dataset, backbone, head, learning_rate, pretrained_lr_factor,
             eval_this_epoch = ((epoch + 1) % eval_every_n_epochs) == 0 and eval_every_n_epochs != -1
             if predict_this_epoch or eval_this_epoch:
                 out_dir = os.path.join(predictions_dir, epoch_name) if predict_this_epoch else None
-                inference_on_test_set(out_dir, eval_this_epoch)
+                inference_on_test_set(out_dir, eval_this_epoch, epoch)
 
     if save_model_every_n_epochs == -1:
         # Save network
@@ -814,7 +847,7 @@ def experiment(dataset, backbone, head, learning_rate, pretrained_lr_factor,
     if prediction_every_n_epochs == -1:
         # Predict on test set
         if predictions_dir is not None:
-            inference_on_test_set(predictions_dir, True)
+            inference_on_test_set(predictions_dir, True, None)
 
 
 if __name__ == '__main__':

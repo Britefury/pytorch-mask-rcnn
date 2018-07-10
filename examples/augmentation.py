@@ -54,16 +54,16 @@ def random_shift(img_size, min_shift, out_size, rng=None):
     Example:
     Take an image as an array and compute the padding+cropping needed to give
     a shift of at least 16 pixels resulting in a 256x256 image:
-    >>> pad0, crop0 = random_shift(x.shape[0], 16, 256)
-    >>> pad1, crop1 = random_shift(x.shape[1], 16, 256)
+    >>> pad0, crop0, offset0 = random_shift(x.shape[0], 16, 256)
+    >>> pad1, crop1, offset1 = random_shift(x.shape[1], 16, 256)
     >>> x = np.pad(x, [pad0, pad1], mode='constant')
     >>> x = x[crop0, crop1]
 
     :param img_size: the size of the original image
     :param min_shift: the amount of variation desired
     :param out_size: the fixed output size
-    :return: tuple `(pad, crop)`, where
-        pad is `(pad_start, pad_end)` and crop is a python slice
+    :return: tuple `(pad, crop, offset)`, where
+        pad is `(pad_start, pad_end)`, crop is a python slice and offset is the translation applied
     """
     if rng is None:
         rng = np.random
@@ -95,7 +95,7 @@ def random_shift(img_size, min_shift, out_size, rng=None):
             padded_size = img_size + pad_start + pad_end
             crop = slice(padded_size - out_size, None)
         pad = pad_start, pad_end
-    return pad, crop
+    return pad, crop, pad[0] - crop.start
 
 
 class ImageAugmentation (object):
