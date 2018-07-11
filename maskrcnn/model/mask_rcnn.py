@@ -16,7 +16,7 @@ from .rcnn import RCNNHead, FasterRCNNBaseModel, refine_detections_batch, pyrami
 
 
 ############################################################
-#  Feature Pyramid Network Heads
+#  Mask head
 ############################################################
 
 class MaskHead (nn.Module):
