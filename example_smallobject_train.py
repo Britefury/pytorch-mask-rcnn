@@ -426,7 +426,8 @@ def experiment(dataset, backbone, head, learning_rate, pretrained_lr_factor,
                 loss = rpn_class_loss + rpn_bbox_loss + mrcnn_class_loss + mrcnn_bbox_loss + mrcnn_mask_loss
 
                 losses = [rpn_class_loss, rpn_bbox_loss, mrcnn_class_loss, mrcnn_bbox_loss, mrcnn_mask_loss]
-                loss_vals = [float(l.detach().cpu()) for l in losses]
+                n_samples = len(X)
+                loss_vals = [float(l.detach().cpu() * n_samples) for l in losses]
 
                 loss.backward()
 
