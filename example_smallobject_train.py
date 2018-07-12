@@ -638,13 +638,13 @@ def experiment(dataset, backbone, head, learning_rate, pretrained_lr_factor,
                 os.makedirs(plot_dir, exist_ok=True)
             for i in test_indices:
                 i = int(i)
-                det_boxes, det_scores, det_class_ids, mrcnn_mask, labels, cls_map = predict_image(d_test.X[i])
+                det_boxes, det_scores, det_class_ids, mrcnn_mask, pred_labels, cls_map = predict_image(d_test.X[i])
 
                 if plot_dir != '':
                     plot_path = os.path.join(plot_dir, 'segmentation_{:04d}_epoch{:04d}.png'.format(i, epoch))
                     plt.figure(figsize=(7, 7))
                     ax = plt.subplot(1, 1, 1)
-                    ax.imshow(visualise_labels(d_test.X[i], labels, mark_edges=True))
+                    ax.imshow(visualise_labels(d_test.X[i], pred_labels, mark_edges=True))
                     plot_boxes(ax, det_boxes[0])
                     plt.savefig(plot_path)
                     plt.close()
@@ -656,18 +656,19 @@ def experiment(dataset, backbone, head, learning_rate, pretrained_lr_factor,
                         sample_name = 'sample{:04d}'.format(i)
                     pred_path = os.path.join(output_dir, '{}.npz'.format(sample_name))
                     np.savez_compressed(pred_path, det_scores=det_scores, det_class_ids=det_class_ids, det_boxes=det_boxes,
-                                        mrcnn_mask=mrcnn_mask, labels=labels, cls_map=cls_map)
+                                        mrcnn_mask=mrcnn_mask, labels=pred_labels, cls_map=cls_map)
 
                     labels_path = os.path.join(output_dir, '{}_labels.png'.format(sample_name))
-                    Image.fromarray(labels.astype(np.uint32)).save(labels_path)
+                    Image.fromarray(pred_labels.astype(np.uint32)).save(labels_path)
 
                     clsmap_path = os.path.join(output_dir, '{}_cls.png'.format(sample_name))
                     Image.fromarray(cls_map.astype(np.uint32)).save(clsmap_path)
 
                 if eval_predictions and d_test.y is not None:
-                    n_reals.append(len(np.unique(labels[labels>0])))
-                    n_dets.append(len(det_boxes[0]))
-                    prec = inference.mean_precision(d_test.y[i], labels)
+                    true_labels = d_test.y[i]
+                    n_reals.append(len(np.unique(true_labels[true_labels>0])))
+                    n_dets.append(len(np.unique(pred_labels[pred_labels>0])))
+                    prec = inference.mean_precision(d_test.y[i], pred_labels)
                     precs.append(prec)
 
             t2 = time.time()
