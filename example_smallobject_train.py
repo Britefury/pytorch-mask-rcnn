@@ -21,8 +21,8 @@ import click
 @click.option('--train_rois_per_image', type=int, default=100, help='# rios per image during training')
 @click.option('--detection_min_confidence', type=float, default=0.7, help='detection minimum confidence')
 @click.option('--detection_nms_threshold', type=float, default=0.3, help='detection NMS threshold')
-@click.option('--box_border', type=float, default=0.0)
-@click.option('--box_border_min', type=int, default=0)
+@click.option('--mask_box_enlarge', type=float, default=1.0)
+@click.option('--mask_box_border_min', type=float, default=0.0)
 @click.option('--mask_nms_thresh', type=float, default=0.9)
 @click.option('--rcnn_hard_neg', is_flag=True, default=False, help='Use hard negative mining when training RCNN head')
 @click.option('--per_sample_loss', is_flag=True, default=True, help='Use per-sample loss')
@@ -68,7 +68,7 @@ def experiment(dataset, backbone, head, learning_rate, pretrained_lr_factor,
                pre_nms_limit, rpn_nms_threshold, post_nms_rois_training,
                post_nms_rois_inference, train_rois_per_image, detection_min_confidence,
                detection_nms_threshold,
-               box_border, box_border_min, mask_nms_thresh, rcnn_hard_neg, per_sample_loss, focal_loss,
+               mask_box_enlarge, mask_box_border_min, mask_nms_thresh, rcnn_hard_neg, per_sample_loss, focal_loss,
                gaussian_noise, scale_u_range, scale_x_range, scale_y_range,
                crop_border, affine_std, rot_range_mag, hflip, vflip, hvflip,
                light_scl_std, light_off_std,
@@ -198,7 +198,8 @@ def experiment(dataset, backbone, head, learning_rate, pretrained_lr_factor,
     #
     config_params = dict(
         use_focal_loss=focal_loss,
-        mask_size=mask_size, rpn_train_anchors_per_image=rpn_train_anchors_per_image,
+        mask_size=mask_size, mask_box_enlarge=mask_box_enlarge, mask_box_border_min=mask_box_border_min,
+        rpn_train_anchors_per_image=rpn_train_anchors_per_image,
         detection_max_instances=detection_max_instances,
         pre_nms_limit=pre_nms_limit, rpn_nms_threshold=rpn_nms_threshold, post_nms_rois_training=post_nms_rois_training,
         post_nms_rois_inference=post_nms_rois_inference, train_rois_per_image=train_rois_per_image,
@@ -305,8 +306,7 @@ def experiment(dataset, backbone, head, learning_rate, pretrained_lr_factor,
         labels_aug = cv2.warpAffine(labels, xf_cv[0], labels.shape[:2][::-1], flags=cv2.INTER_NEAREST)
 
         # Extract instance masks and boxes
-        gt_boxes, gt_masks = label_image_to_gt(labels_aug, image_size, mini_mask_shape=net.config.MINI_MASK_SHAPE,
-                                               box_border=box_border, box_border_min=box_border_min)
+        gt_boxes, gt_masks = label_image_to_gt(labels_aug, image_size, mini_mask_shape=net.config.MINI_MASK_SHAPE)
 
         # plt.figure(figsize=(8, 8))
         # ax = plt.subplot(1, 1, 1)
@@ -448,10 +448,10 @@ def experiment(dataset, backbone, head, learning_rate, pretrained_lr_factor,
 
                 # y1, x1, y2, x2
                 window = np.array([[0.0, 0.0, float(image_size[0]), float(image_size[1])]])
-                det_boxes, det_class_ids, det_scores, mrcnn_mask = net.detect_forward_np(X_var, window)[0]
+                det_boxes, det_class_ids, det_scores, mask_boxes, mrcnn_mask = net.detect_forward_np(X_var, window)[0]
                 labels, cls_map = inference.mrcnn_detections_to_label_image(
-                    image_size, det_scores, det_class_ids, det_boxes, mrcnn_mask, mask_nms_thresh=mask_nms_thresh)
-            return det_boxes, det_scores, det_class_ids, mrcnn_mask, labels, cls_map
+                    image_size, det_scores, det_class_ids, mask_boxes, mrcnn_mask, mask_nms_thresh=mask_nms_thresh)
+            return det_boxes, det_scores, det_class_ids, mask_boxes, mrcnn_mask, labels, cls_map
 
     elif head == 'faster_rcnn':
         # Train on a single batch
@@ -638,7 +638,8 @@ def experiment(dataset, backbone, head, learning_rate, pretrained_lr_factor,
                 os.makedirs(plot_dir, exist_ok=True)
             for i in test_indices:
                 i = int(i)
-                det_boxes, det_scores, det_class_ids, mrcnn_mask, pred_labels, cls_map = predict_image(d_test.X[i])
+                det_boxes, det_scores, det_class_ids, mask_boxes, mrcnn_mask, pred_labels, cls_map = predict_image(
+                    d_test.X[i])
 
                 if plot_dir != '':
                     plot_path = os.path.join(plot_dir, 'segmentation_{:04d}_epoch{:04d}.png'.format(i, epoch))
@@ -656,7 +657,8 @@ def experiment(dataset, backbone, head, learning_rate, pretrained_lr_factor,
                         sample_name = 'sample{:04d}'.format(i)
                     pred_path = os.path.join(output_dir, '{}.npz'.format(sample_name))
                     np.savez_compressed(pred_path, det_scores=det_scores, det_class_ids=det_class_ids, det_boxes=det_boxes,
-                                        mrcnn_mask=mrcnn_mask, labels=pred_labels, cls_map=cls_map)
+                                        mask_boxes=mask_boxes, mrcnn_mask=mrcnn_mask, labels=pred_labels,
+                                        cls_map=cls_map)
 
                     labels_path = os.path.join(output_dir, '{}_labels.png'.format(sample_name))
                     Image.fromarray(pred_labels.astype(np.uint32)).save(labels_path)

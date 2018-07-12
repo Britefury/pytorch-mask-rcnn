@@ -189,6 +189,17 @@ class Config(object):
     # Target mask shape
     MASK_SHAPE = [28, 28]
 
+    # Mask box border: Adds a border to the boxes used during mask training and inference
+    # The size of the box used is the largest of MASK_BOX_ENLARGE or MASK_BOX_BORDER_MIN
+
+    # MASK_BOX_ENLARGE is the fraction by which the box is enlarged, e.g. 1.2 will add
+    # 10% to each edge of the box
+    MASK_BOX_ENLARGE = 1.0
+
+    # MASK_BOX_BORDER_MIN will cause a border of at least `MASK_BOX_BORDER_MIN` pixels to be
+    # added to each edge
+    MASK_BOX_BORDER_MIN = 0.0
+
     # Dilation used in convolutional layers in mask head
     MASK_CONV_DILATION = 1
 

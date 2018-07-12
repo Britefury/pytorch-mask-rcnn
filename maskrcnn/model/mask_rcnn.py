@@ -9,8 +9,8 @@ import torch.nn.functional as F
 from maskrcnn.roialign.crop_and_resize.crop_and_resize import CropAndResizeAligned
 from .utils import not_empty, is_empty, box_refinement, SamePad2d, concatenate_detections, flatten_detections,\
     unflatten_detections, split_detections, torch_tensor_to_int_list
-from .rpn import RPNHead, compute_rpn_losses, compute_rpn_losses_per_sample, alt_forward_method
-from .rcnn import RCNNHead, FasterRCNNBaseModel, refine_detections_batch, pyramid_roi_align, compute_rcnn_bbox_loss,\
+from .rpn import compute_rpn_losses, compute_rpn_losses_per_sample, alt_forward_method
+from .rcnn import FasterRCNNBaseModel, pyramid_roi_align, compute_rcnn_bbox_loss,\
     compute_rcnn_class_loss, bbox_overlaps
 
 
@@ -234,8 +234,63 @@ def compute_maskrcnn_losses(config, rpn_pred_class_logits, rpn_pred_bbox, rpn_ta
 #  Detection target generation
 ############################################################
 
-def maskrcnn_detection_target_one_sample(config, proposals_nrm, prop_class_logits, prop_class, prop_bbox_deltas, gt_class_ids,
-                                         gt_boxes_nrm, gt_masks, hard_negative_mining=False):
+def _mask_box_enlarge_img_batch(config, box_img):
+    """
+    Apply mask box enlargement as controlled by the configuration parameters
+
+    :param config: configuration instance
+    :param box_img: boxes as a [N, detections, (y1, x1, y2, x2)] tensor in image co-ordinates
+    :return: enalarged boxes in image co-ordinates as a [N, detections, (y1, x1, y2, x2)] tensor
+    """
+    if config.MASK_BOX_ENLARGE != 1.0 or config.MASK_BOX_BORDER_MIN != 0.0:
+        # Compute size and centre
+        size = box_img[:, :, 2:4] - box_img[:, :, 0:2]
+        centre = (box_img[:, :, 2:4] + box_img[:, :, 0:2]) * 0.5
+
+        # Compute enlarged size as the maximum of enlarging by fraction and growing with border
+        enlarged_size = torch.max(size * config.MASK_BOX_ENLARGE,
+                                  size + config.MASK_BOX_BORDER_MIN * 2.0)
+
+        # Convert to [y1, x1, y2, x2]
+        return torch.cat([centre - enlarged_size * 0.5, centre + enlarged_size * 0.5], dim=2), True
+    else:
+        return box_img, False
+
+
+def _mask_box_enlarge_nrm_sample(config, box_nrm, nrm_to_img_scale):
+    """
+    Apply mask box enlargement as controlled by the configuration parameters
+
+    :param config: configuration instance
+    :param box_nrm: boxes as a [N, (y1, x1, y2, x2)] tensor in normalized co-ordinates
+    :param nrm_to_img_scale: scale factor that will convert normalized co-ordinates to
+        image co-ordinates
+    :return: enalarged boxes in normalized co-ordinates as a [N, (y1, x1, y2, x2)] tensor
+    """
+    if config.MASK_BOX_ENLARGE != 1.0 or config.MASK_BOX_BORDER_MIN != 0.0:
+        # Transform boxes to image co-ordinates
+        box_img = box_nrm * nrm_to_img_scale
+
+        # Compute size and centre
+        size = box_img[:, 2:4] - box_img[:, 0:2]
+        centre = (box_img[:, 2:4] + box_img[:, 0:2]) * 0.5
+
+        # Compute enlarged size as the maximum of enlarging by fraction and growing with border
+        enlarged_size = torch.max(size * config.MASK_BOX_ENLARGE,
+                                  size + config.MASK_BOX_BORDER_MIN * 2.0)
+
+        # Convert to [y1, x1, y2, x2]
+        enlarged_box_img = torch.cat([centre - enlarged_size * 0.5, centre + enlarged_size * 0.5], dim=1)
+
+        # Convert to normalized co-ordinates
+        return enlarged_box_img / nrm_to_img_scale
+    else:
+        return box_nrm
+
+
+def maskrcnn_detection_target_one_sample(config, image_size, proposals_nrm, prop_class_logits, prop_class,
+                                         prop_bbox_deltas, gt_class_ids, gt_boxes_nrm, gt_masks,
+                                         hard_negative_mining=False):
     """Subsamples proposals and matches them with ground truth boxes, generating target box refinement,
     class_ids and masks.
 
@@ -245,6 +300,7 @@ def maskrcnn_detection_target_one_sample(config, proposals_nrm, prop_class_logit
     otherwise they are optional.
 
     :param config: configuration object
+    :param image_size: image size as a `(height, width)` tuple
     :param proposals_nrm: [N, (y1, x1, y2, x2)] in normalized coordinates.
     :param prop_class_logits: (optional) [N, N_CLASSES] predicted RCNN class logits for each proposal (used
         when hard negative mining is enabled).
@@ -271,6 +327,8 @@ def maskrcnn_detection_target_one_sample(config, proposals_nrm, prop_class_logit
                  Masks cropped to bbox boundaries and resized to neural network output size.
     """
     device = proposals_nrm.device
+    nrm_scale = torch.tensor([image_size[0], image_size[1], image_size[0], image_size[1]], dtype=torch.float,
+                             device=device)
 
     if hard_negative_mining:
         if prop_class_logits is None:
@@ -367,22 +425,23 @@ def maskrcnn_detection_target_one_sample(config, proposals_nrm, prop_class_logit
         roi_masks = gt_masks[roi_gt_box_assignment.data,:,:]
 
         # Compute mask targets
-        boxes = positive_rois
+        mask_boxes = _mask_box_enlarge_nrm_sample(config, positive_rois, nrm_scale)
         if config.USE_MINI_MASK:
             # Transform ROI corrdinates from normalized image space
             # to normalized mini-mask space.
-            y1, x1, y2, x2 = positive_rois.chunk(4, dim=1)
-            gt_y1, gt_x1, gt_y2, gt_x2 = roi_gt_boxes.chunk(4, dim=1)
+            mask_gt_boxes = _mask_box_enlarge_nrm_sample(config, roi_gt_boxes, nrm_scale)
+            y1, x1, y2, x2 = mask_boxes.chunk(4, dim=1)
+            gt_y1, gt_x1, gt_y2, gt_x2 = mask_gt_boxes.chunk(4, dim=1)
             gt_h = gt_y2 - gt_y1
             gt_w = gt_x2 - gt_x1
             y1 = (y1 - gt_y1) / gt_h
             x1 = (x1 - gt_x1) / gt_w
             y2 = (y2 - gt_y1) / gt_h
             x2 = (x2 - gt_x1) / gt_w
-            boxes = torch.cat([y1, x1, y2, x2], dim=1)
+            mask_boxes = torch.cat([y1, x1, y2, x2], dim=1)
         box_ids = torch.arange(roi_masks.size()[0], dtype=torch.int, device=device)
         masks = CropAndResizeAligned(config.MASK_SHAPE[0], config.MASK_SHAPE[1], 0)(
-            roi_masks.detach().unsqueeze(1), boxes.detach(), box_ids.detach())
+            roi_masks.detach().unsqueeze(1), mask_boxes.detach(), box_ids.detach())
         masks = masks.squeeze(1)
 
         # Threshold mask pixels at 0.5 to have GT masks be 0 or 1 to use with
@@ -471,7 +530,8 @@ def maskrcnn_detection_target_one_sample(config, proposals_nrm, prop_class_logit
     return rois, roi_class_logits, roi_class_probs, roi_bbox_deltas, roi_gt_class_ids, deltas, masks
 
 
-def maskrcnn_detection_target_batch(config, proposals_nrm, prop_class_logits, prop_class, prop_bbox_deltas, n_proposals_per_sample,
+def maskrcnn_detection_target_batch(config, image_size, proposals_nrm, prop_class_logits, prop_class, prop_bbox_deltas,
+                                    n_proposals_per_sample,
                                     gt_class_ids, gt_boxes_nrm, gt_masks, n_gts_per_sample, hard_negative_mining):
     """Subsamples proposals and generates target box refinement, class_ids and masks for each.
 
@@ -481,6 +541,7 @@ def maskrcnn_detection_target_batch(config, proposals_nrm, prop_class_logits, pr
     otherwise they are optional.
 
     :param config: configuration object
+    :param image_size: image size as a `(height, width)` tuple
     :param proposals_nrm: [batch, N, (y1, x1, y2, x2)] in normalized coordinates. Dim 1 will
             be zero padded if there are not enough proposals.
     :param prop_class_logits: [batch, N, N_CLASSES] predicted class logits for each proposal. Dim 1 will
@@ -551,15 +612,10 @@ def maskrcnn_detection_target_batch(config, proposals_nrm, prop_class_logits, pr
             else:
                 sample_prop_class_logits = sample_prop_class = sample_prop_bbox_deltas = None
             sample_rois, sample_roi_class_logits, sample_roi_class_probs, sample_roi_bbox_deltas, \
-                    sample_roi_gt_class_ids, sample_deltas, sample_masks = maskrcnn_detection_target_one_sample(config, proposals_nrm[sample_i,
-                                                                                                                        :n_props],
-                                                                                                                sample_prop_class_logits,
-                                                                                                                sample_prop_class,
-                                                                                                                sample_prop_bbox_deltas,
-                                                                                                                gt_class_ids[sample_i,
-                                                                                                                :n_gts],
-                                                                                                                gt_boxes_nrm[sample_i, :n_gts],
-                                                                                                                gt_masks[sample_i, :n_gts])
+                    sample_roi_gt_class_ids, sample_deltas, sample_masks = maskrcnn_detection_target_one_sample(
+                            config, image_size, proposals_nrm[sample_i, :n_props], sample_prop_class_logits,
+                            sample_prop_class, sample_prop_bbox_deltas, gt_class_ids[sample_i, :n_gts],
+                            gt_boxes_nrm[sample_i, :n_gts], gt_masks[sample_i, :n_gts])
             if not_empty(sample_rois):
                 sample_rois = sample_rois.unsqueeze(0)
                 if has_rcnn_predictions:
@@ -596,6 +652,23 @@ def maskrcnn_detection_target_batch(config, proposals_nrm, prop_class_logits, pr
             rois, target_class_ids, target_deltas, target_mask)
 
     return rois, roi_class_logits, roi_class_probs, roi_bbox_deltas, roi_gt_class_ids, deltas, masks, n_dets_per_sample
+
+
+def clip_to_windows_batch(windows, boxes):
+    """
+    Clip a batch boxes to fit within a batch of image windows
+
+        windows: [N, (y1, x1, y2, x2)]. The windows in the images we want to clip to.
+        boxes: [N, detections, (y1, x1, y2, x2)]
+    """
+    boxes[:, :, 0] = boxes[:, :, 0].max(windows[:, None, 0]).min(windows[:, None, 2])
+    boxes[:, :, 1] = boxes[:, :, 1].max(windows[:, None, 1]).min(windows[:, None, 3])
+    boxes[:, :, 2] = boxes[:, :, 2].max(windows[:, None, 0]).min(windows[:, None, 2])
+    boxes[:, :, 3] = boxes[:, :, 3].max(windows[:, None, 1]).min(windows[:, None, 3])
+
+    return boxes
+
+
 
 
 ############################################################
@@ -682,8 +755,9 @@ class AbstractMaskRCNNModel (FasterRCNNBaseModel):
             # Note that proposal class IDs, gt_boxes, and gt_masks are zero
             # padded. Equally, returned rois and targets are zero padded.
             rois, mrcnn_class_logits, mrcnn_class, mrcnn_bbox, target_class_ids, target_deltas, target_mask, n_targets_per_sample = \
-                maskrcnn_detection_target_batch(self.config, rpn_rois, roi_class_logits, roi_class, roi_bbox, n_rois_per_sample,
-                                                gt_class_ids, gt_boxes_nrm, gt_masks, n_gts_per_sample, hard_negative_mining)
+                maskrcnn_detection_target_batch(self.config, image_size, rpn_rois, roi_class_logits, roi_class,
+                                                roi_bbox, n_rois_per_sample, gt_class_ids, gt_boxes_nrm, gt_masks,
+                                                n_gts_per_sample, hard_negative_mining)
 
             if is_empty(rois):
                 mrcnn_mask = torch.zeros([0], dtype=torch.float, device=device)
@@ -698,7 +772,8 @@ class AbstractMaskRCNNModel (FasterRCNNBaseModel):
             # Note that proposal class IDs, gt_boxes, and gt_masks are zero
             # padded. Equally, returned rois and targets are zero padded.
             rois, _, _, _, target_class_ids, target_deltas, target_mask, n_targets_per_sample = \
-                maskrcnn_detection_target_batch(self.config, rpn_rois, None, None, None, n_rois_per_sample, gt_class_ids, gt_boxes_nrm,
+                maskrcnn_detection_target_batch(self.config, image_size, rpn_rois, None, None, None,
+                                                n_rois_per_sample, gt_class_ids, gt_boxes_nrm,
                                                 gt_masks, n_gts_per_sample, hard_negative_mining)
 
 
@@ -745,15 +820,15 @@ class AbstractMaskRCNNModel (FasterRCNNBaseModel):
             n_targets_per_sample: [batch] the number of targets in each sample
         """
         (rpn_class_logits, rpn_bbox, target_class_ids, mrcnn_class_logits,
-            target_deltas, mrcnn_bbox, target_mask, mrcnn_mask, n_targets_per_sample) = self._train_forward(
+            target_deltas, rcnn_bbox, target_mask, mrcnn_mask, n_targets_per_sample) = self._train_forward(
                     images, gt_class_ids, gt_boxes, gt_masks, n_gts_per_sample,
                     hard_negative_mining=hard_negative_mining)
 
-        target_class_ids, mrcnn_class_logits, target_deltas, mrcnn_bbox, target_mask, mrcnn_mask = \
-            flatten_detections(n_targets_per_sample, target_class_ids, mrcnn_class_logits, target_deltas, mrcnn_bbox, target_mask, mrcnn_mask)
+        target_class_ids, mrcnn_class_logits, target_deltas, rcnn_bbox, target_mask, mrcnn_mask = \
+            flatten_detections(n_targets_per_sample, target_class_ids, mrcnn_class_logits, target_deltas, rcnn_bbox, target_mask, mrcnn_mask)
 
         return (rpn_class_logits, rpn_bbox, target_class_ids, mrcnn_class_logits,
-                target_deltas, mrcnn_bbox, target_mask, mrcnn_mask, n_targets_per_sample)
+                target_deltas, rcnn_bbox, target_mask, mrcnn_mask, n_targets_per_sample)
 
 
     @alt_forward_method
@@ -816,27 +891,40 @@ class AbstractMaskRCNNModel (FasterRCNNBaseModel):
         return (rpn_class_losses, rpn_bbox_losses, rcnn_class_losses, rcnn_bbox_losses, mrcnn_mask_losses)
 
 
-    def mask_detect_forward(self, image_size, mrcnn_feature_maps, det_boxes, det_class_ids, n_dets_per_sample):
+    def mask_detect_forward(self, image_size, image_windows, mrcnn_feature_maps, det_boxes, det_class_ids, n_dets_per_sample):
         """Runs the mask stage of the detection pipeline.
 
         :param image_size: image shape as a (height, width) tuple
+        :param image_windows: [N, (y1, x1, y2, x2)] in image coordinates. The part of the images
+                that contain the image excluding the padding.
         :param mrcnn_feature_maps: per-FPN level feature maps for RCNN;
                 list of [batch, feat_chn, lvl_height, lvl_width] tensors
         :param det_boxes: [batch, N, (y1, x1, y2, x2)] detection boxes from RCNN in image coordinates
         :param det_class_ids: [batch, N] detection class IDs from RCNN
         :param n_dets_per_sample: number of detections per sample from RCNN
 
-        :return: [batch, detection, height, width] mask predictions as a torch tensor
+        :return: (mask_boxes, masks) where
+            mask_boxes: (batch, (y1, x1, y2, x2) boxes used for mask predictions; will not be the same
+                as the detection boxes passed as the `det_boxes` parameter if mask box enlargement is
+                enabled
+            masks: [batch, detection, height, width] mask predictions as a torch tensor
         """
         device = det_boxes.device
 
         if det_boxes.shape[0] == 0:
             return torch.zeros([0], dtype=torch.float, device=device)
         else:
+            # Enlarge boxes according to config
+            mask_boxes, enlarged = _mask_box_enlarge_img_batch(self.config, det_boxes)
+            if enlarged:
+                image_windows = torch.tensor(image_windows, dtype=torch.float, device=device)
+                mask_boxes = clip_to_windows_batch(image_windows, mask_boxes)
+                mask_boxes = torch.round(mask_boxes)
+
             # Convert boxes to normalized coordinates for mask generation
             h, w = image_size
             scale = torch.tensor(np.array([h, w, h, w]), dtype=torch.float, device=device)
-            det_boxes_nrm = det_boxes / scale[None, None, :]
+            mask_boxes_nrm = mask_boxes / scale[None, None, :]
 
             # Generate masks
             mrcnn_mask = []
@@ -846,8 +934,8 @@ class AbstractMaskRCNNModel (FasterRCNNBaseModel):
             # to feed into the mask head and the convolutional layers in the mask head add additional load.
             # To reduce this, process at most `self.config.DETECTION_BLOCK_SIZE_INFERENCE` detections
             # per sample at a time.
-            for mask_i in range(0, det_boxes_nrm.size()[1], self.config.DETECTION_BLOCK_SIZE_INFERENCE):
-                mask_j = min(mask_i + self.config.DETECTION_BLOCK_SIZE_INFERENCE, det_boxes_nrm.size()[1])
+            for mask_i in range(0, mask_boxes_nrm.size()[1], self.config.DETECTION_BLOCK_SIZE_INFERENCE):
+                mask_j = min(mask_i + self.config.DETECTION_BLOCK_SIZE_INFERENCE, mask_boxes_nrm.size()[1])
 
                 n_dets_per_sample_block = [
                     min(mask_j, n_dets) - min(mask_i, n_dets) for n_dets in n_dets_per_sample
@@ -857,7 +945,7 @@ class AbstractMaskRCNNModel (FasterRCNNBaseModel):
                 # so the mask head won't waste resources.
                 # The mask head will also convert the resulting mask predictions to a [sample, detection, ...]
                 # shape with zero padding
-                mrcnn_mask_block = self.mask(mrcnn_feature_maps, det_boxes_nrm[:, mask_i:mask_j, ...],
+                mrcnn_mask_block = self.mask(mrcnn_feature_maps, mask_boxes_nrm[:, mask_i:mask_j, ...],
                                              n_dets_per_sample_block, image_size)
                 # mrcnn_mask_block: [batch, detection_index, object_class, height, width] with zero padding in dim1
 
@@ -877,7 +965,7 @@ class AbstractMaskRCNNModel (FasterRCNNBaseModel):
 
             mrcnn_mask = torch.cat(mrcnn_mask, dim=1)
 
-            return mrcnn_mask
+            return mask_boxes, mrcnn_mask
 
 
     def detect_forward(self, images, image_windows, override_class=None):
@@ -891,6 +979,9 @@ class AbstractMaskRCNNModel (FasterRCNNBaseModel):
             det_boxes: [batch, detection, 4] detection boxes
             det_class_ids: [batch, detection] detection class IDs
             roi_scores: [batch, detection] detection confidence scores
+            mask_boxes: [batch, detection, 4] mask boxes (will be enlarged versions of det_boxes if
+                mask box enlargement is enabled in the configuration, otherwise mask_boxes and det_boxes will
+                be the same)
             mrcnn_mask: [batch, detection, height, width] mask detections
             n_dets_per_sample: [batch] number of detections per sample in the batch
         """
@@ -906,9 +997,10 @@ class AbstractMaskRCNNModel (FasterRCNNBaseModel):
             image_size, image_windows, mrcnn_feature_maps, rpn_rois, n_rois_per_sample, override_class=override_class)
 
         # mrcnn_mask: [batch, detection, height, width, cls]
-        mrcnn_mask = self.mask_detect_forward(image_size, mrcnn_feature_maps, det_boxes, det_class_ids, n_dets_per_sample)
+        mask_boxes, mrcnn_mask = self.mask_detect_forward(
+            image_size, image_windows, mrcnn_feature_maps, det_boxes, det_class_ids, n_dets_per_sample)
 
-        return det_boxes, det_class_ids, det_scores, mrcnn_mask, n_dets_per_sample
+        return det_boxes, det_class_ids, det_scores,mask_boxes,  mrcnn_mask, n_dets_per_sample
 
 
     def detect_forward_np(self, images, image_windows, override_class=None):
@@ -923,9 +1015,12 @@ class AbstractMaskRCNNModel (FasterRCNNBaseModel):
             det_boxes: [1, detections, [y1, x1, y2, x2]] detection boxes
             det_class_ids: [1, detections] detection class IDs
             det_scores: [1, detections] detection confidence scores
+            mask_boxes: [1, detections, [y1, x1, y2, x2]] mask boxes (will be enlarged versions of det_boxes if
+                mask box enlargement is enabled in the configuration, otherwise mask_boxes and det_boxes will
+                be the same)
             mrcnn_mask: [1, detections, height, width] mask detections
         """
-        det_boxes, det_class_ids, det_scores, mrcnn_mask, n_dets_per_sample = self.detect_forward(
+        det_boxes, det_class_ids, det_scores, mask_boxes, mrcnn_mask, n_dets_per_sample = self.detect_forward(
             images, image_windows, override_class=override_class)
 
 
@@ -935,6 +1030,7 @@ class AbstractMaskRCNNModel (FasterRCNNBaseModel):
             return [(np.zeros((n_images, 0, 4), dtype=np.float32),
                      np.zeros((n_images, 0), dtype=int),
                      np.zeros((n_images, 0), dtype=np.float32),
+                     np.zeros((n_images, 0, 4), dtype=np.float32),
                      np.zeros((n_images, 0) + tuple(self.config.MASK_SHAPE), dtype=np.float32))
                     for i in range(n_images)]
 
@@ -942,6 +1038,8 @@ class AbstractMaskRCNNModel (FasterRCNNBaseModel):
         det_boxes_np = det_boxes.data.cpu().numpy()
         det_class_ids_np = det_class_ids.data.cpu().numpy()
         det_scores_np = det_scores.data.cpu().numpy()
+        mask_boxes_np = mask_boxes.cpu().numpy()
         mrcnn_mask_np = mrcnn_mask.cpu().numpy()
 
-        return split_detections(n_dets_per_sample, det_boxes_np, det_class_ids_np, det_scores_np, mrcnn_mask_np)
+        return split_detections(n_dets_per_sample, det_boxes_np, det_class_ids_np, det_scores_np, mask_boxes_np,
+                                mrcnn_mask_np)

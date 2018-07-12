@@ -58,8 +58,8 @@ class SmallObjectMaskRCNNConfig (config.Config):
 
     NUM_PYRAMID_LEVELS = len(BACKBONE_STRIDES)
 
-    def __init__(self, use_focal_loss=False, mask_size=28, rpn_train_anchors_per_image=256,
-                 detection_max_instances=1024,
+    def __init__(self, use_focal_loss=False, mask_size=28, mask_box_enlarge=1.0, mask_box_border_min=0.0,
+                 rpn_train_anchors_per_image=256, detection_max_instances=1024,
                  pre_nms_limit=6000, pre_nms_limit_unsup=6000,
                  rpn_nms_threshold=0.7, rpn_nms_threshold_unsup=0.3,
                  post_nms_rois_training=2048, post_nms_rois_training_unsup=512,
@@ -106,6 +106,8 @@ class SmallObjectMaskRCNNConfig (config.Config):
         self.MINI_MASK_SHAPE = (mask_size * 2, mask_size * 2)  # (height, width) of the mini-mask
         self.MASK_POOL_SIZE = mask_size // 2
         self.MASK_SHAPE = [mask_size, mask_size]
+        self.MASK_BOX_ENLARGE = mask_box_enlarge
+        self.MASK_BOX_BORDER_MIN = mask_box_border_min
 
 
 

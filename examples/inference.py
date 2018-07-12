@@ -220,14 +220,14 @@ def mrcnn_transformed_image_padding(image_size, xf, net_block_size):
     return window, final_xf, block_padded_shape
 
 
-def mrcnn_detections_to_label_image(image_size, det_scores, det_class_id, det_boxes, mrcnn_mask, mask_nms_thresh=0.9):
+def mrcnn_detections_to_label_image(image_size, det_scores, det_class_id, mask_boxes, mrcnn_mask, mask_nms_thresh=0.9):
     """
     Generate a label image from Mask-RCNN detections
 
     :param image_size: the size of the label image as `(height, width)`
     :param det_scores: Detection scores; (1, N) or (N,) array
     :param det_class_id: Detection class IDs; (1, N) or (N,) array
-    :param det_boxes: Detection boxes; (1, N, 4) or (N, 4) array, each box is [y1, x1, y2, x2]
+    :param mask_boxes: Detection boxes; (1, N, 4) or (N, 4) array, each box is [y1, x1, y2, x2]
     :param mrcnn_mask: Detection masks; (1, N, H, W) or (N, H, W) array, where H,W is the mask size
     :param mask_nms_thresh: Mask NMS threshold
     :return: (label_img, cls_img)
@@ -236,7 +236,7 @@ def mrcnn_detections_to_label_image(image_size, det_scores, det_class_id, det_bo
     """
     if det_scores.ndim == 2:
         # Remove batch dimension
-        det_boxes = det_boxes[0]
+        mask_boxes = mask_boxes[0]
         det_scores = det_scores[0]
         det_class_id = det_class_id[0]
         mrcnn_mask = mrcnn_mask[0]
@@ -249,7 +249,7 @@ def mrcnn_detections_to_label_image(image_size, det_scores, det_class_id, det_bo
 
     label_i = 1
     for i in order:
-        box = det_boxes[i]
+        box = mask_boxes[i]
         y1, x1, y2, x2 = box
         y1 = int(y1)
         x1 = int(x1)

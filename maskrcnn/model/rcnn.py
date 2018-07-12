@@ -308,11 +308,9 @@ def refine_detections(config, rois_nrm, pred_class_probs, pred_box_deltas, windo
 
     # Clip boxes to image window
     refined_rois = clip_to_window(window, refined_rois)
-    refined_sizes = refined_rois[:, 2:4] - refined_rois[:, 0:2]
 
     # Round and cast to int since we're dealing with pixels now
     refined_rois = torch.round(refined_rois)
-    refined_sizes = refined_rois[:, 2:4] - refined_rois[:, 0:2]
 
     # TODO: Filter out boxes with zero area
 
