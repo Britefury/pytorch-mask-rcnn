@@ -665,7 +665,7 @@ def experiment(dataset, backbone, head, learning_rate, pretrained_lr_factor,
                     Image.fromarray(cls_map.astype(np.uint32)).save(clsmap_path)
 
                 if eval_predictions and d_test.y is not None:
-                    n_reals.append(len(d_test.convex_hulls[i]) - 1)
+                    n_reals.append(len(np.unique(labels[labels>0])))
                     n_dets.append(len(det_boxes[0]))
                     prec = inference.mean_precision(d_test.y[i], labels)
                     precs.append(prec)
