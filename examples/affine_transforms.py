@@ -92,6 +92,14 @@ def scale_matrices(scale_xy):
 def rotation_matrices(thetas):
     """
     Generate rotation matrices
+
+    Counter-clockwise, +y points downwards
+
+    Where s = sin(theta) and c = cos(theta)
+
+    M = [[ c   s   0 ]
+         [ -s  c   0 ]]
+
     :param thetas: rotation angles in radians as a (N,) array
     :return: rotation matrices, (N,2,3) array
     """
@@ -100,8 +108,8 @@ def rotation_matrices(thetas):
     s = np.sin(thetas)
     rot_xf = np.zeros((N, 2, 3), dtype=np.float32)
     rot_xf[:, 0, 0] = rot_xf[:, 1, 1] = c
-    rot_xf[:, 1, 0] = s
-    rot_xf[:, 0, 1] = -s
+    rot_xf[:, 1, 0] = -s
+    rot_xf[:, 0, 1] = s
     return rot_xf
 
 def transform_points(xf, points_xy):
