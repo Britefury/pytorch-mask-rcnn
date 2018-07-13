@@ -911,8 +911,8 @@ class AbstractMaskRCNNModel (FasterRCNNBaseModel):
         """
         device = det_boxes.device
 
-        if det_boxes.shape[0] == 0:
-            return torch.zeros([0], dtype=torch.float, device=device)
+        if sum(n_dets_per_sample) == 0:
+            return torch.zeros([0], dtype=torch.float, device=device), torch.zeros([0], dtype=torch.float, device=device)
         else:
             # Enlarge boxes according to config
             mask_boxes, enlarged = _mask_box_enlarge_img_batch(self.config, det_boxes)
