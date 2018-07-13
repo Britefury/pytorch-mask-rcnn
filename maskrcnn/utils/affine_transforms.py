@@ -277,6 +277,35 @@ def axis_to_axis_rotation_matrices(axes_a, axes_b, normalize=False, epsilon=1e-1
     return axis_angle_rotation_matrices(rotation_axes, rotation_thetas)
 
 
+def triangle_to_triangle_matrices(src_tris_xy, tgt_tris_xy):
+    """
+    Return transformation matrices that transform the triangles in `src_tris_xy` to the triangles in `tgt_tris_xy`
+    :param src_tris_xy: source triangles as a (N, 3, 2) array, where co-ordinates are xy
+    :param tgt_tris_xy: target triangles as a (N, 3, 2) array, where co-ordinates are xy
+    :return: transformation matrices as an (N, 3, 2) array
+    """
+    if len(src_tris_xy) != len(tgt_tris_xy) and len(src_tris_xy) != 1 and len(tgt_tris_xy) != 1:
+        raise ValueError('Number of source tris ({}) != number of target tris ({})'.format(len(src_tris_xy), len(tgt_tris_xy)))
+
+    tgt_u = tgt_tris_xy[:, 1, :] - tgt_tris_xy[:, 0, :]
+    tgt_v = tgt_tris_xy[:, 2, :] - tgt_tris_xy[:, 0, :]
+    src_u = src_tris_xy[:, 1, :] - src_tris_xy[:, 0, :]
+    src_v = src_tris_xy[:, 2, :] - src_tris_xy[:, 0, :]
+
+    # Target matrix
+    # [u[0], v[0], a[0]]
+    # [u[1], v[1], a[1]]
+    tgt_mtx = np.stack([tgt_u, tgt_v, tgt_tris_xy[:, 0, :]], axis=2)
+
+    # Source matrix
+    # [u[0], v[0], a[0]]
+    # [u[1], v[1], a[1]]
+    src_mtx = np.stack([src_u, src_v, src_tris_xy[:, 0, :]], axis=2)
+
+    src_to_tgt_matrix = cat_nx2x3_2(tgt_mtx, inv_nx2x3(src_mtx))
+
+    return src_to_tgt_matrix
+
 
 def compute_transformed_image_padding(image_size, xf):
     """

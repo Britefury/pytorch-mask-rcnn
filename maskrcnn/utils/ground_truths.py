@@ -1,10 +1,5 @@
-import math
 import numpy as np
-from matplotlib import pyplot as plt
-from skimage.measure import regionprops
 import skimage.transform
-from examples import affine_transforms
-import cv2
 
 
 def _object_mask_to_gt(image_size, object_mask, mini_mask_shape=None):
@@ -42,7 +37,6 @@ def _object_mask_to_gt(image_size, object_mask, mini_mask_shape=None):
 
     return box, mini_mask
 
-_ROOT_2 = math.sqrt(2.0)
 
 def label_image_to_gt(labels, image_size, mini_mask_shape=None):
     """
@@ -79,3 +73,5 @@ def label_image_to_gt(labels, image_size, mini_mask_shape=None):
             gt_masks = np.zeros((0,) + mini_mask_shape)
 
     return gt_boxes, gt_masks
+
+

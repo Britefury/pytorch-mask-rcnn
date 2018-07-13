@@ -1,5 +1,10 @@
 import click
 
+import maskrcnn.utils.evaluation
+import maskrcnn.utils.ground_truths
+import maskrcnn.utils.image_padding
+import maskrcnn.utils.inference
+
 
 @click.command()
 @click.option('--dataset', type=click.Choice(['s1_train_test', 's1_train_val', 'stage2', 'ellipses']),
@@ -123,18 +128,18 @@ def experiment(dataset, backbone, head, learning_rate, pretrained_lr_factor,
     from batchup import data_source, work_pool, sampling
     from examples.ellipses import ellipses_dataset
     from examples.kaggle_dsbowl2018 import cellnucleus_dataset
-    from examples import augmentation, affine_transforms, affine_torch, inference
+    from examples import augmentation
+    from maskrcnn.utils import affine_torch, affine_transforms
     from examples import smallobj_network_architectures
     from PIL import Image
     from matplotlib import pyplot as plt
-    from sklearn.model_selection import ShuffleSplit, StratifiedShuffleSplit
+    from sklearn.model_selection import StratifiedShuffleSplit
     import torch, torch.cuda
-    from torch import nn
     from torch.nn import functional as F
-    from torch.optim import lr_scheduler
     from maskrcnn.model import mask_rcnn, rcnn, rpn
-    from maskrcnn.model.utils import concatenate_detection_arrays, plot_boxes, visualise_labels
-    from examples.ground_truths import label_image_to_gt
+    from maskrcnn.model.utils import concatenate_detection_arrays
+    from maskrcnn.utils.plotting import visualise_labels, plot_boxes
+    from maskrcnn.utils.ground_truths import label_image_to_gt
     import cv2
 
     if hide_progress_bar:
@@ -261,8 +266,8 @@ def experiment(dataset, backbone, head, learning_rate, pretrained_lr_factor,
             raise RuntimeError
 
         # Crop out a region for training
-        pad_axis_0, crop_axis_0, offset_axis_0 = augmentation.random_shift(labels.shape[0], crop_border, fixed_size)
-        pad_axis_1, crop_axis_1, offset_axis_1 = augmentation.random_shift(labels.shape[1], crop_border, fixed_size)
+        pad_axis_0, crop_axis_0, offset_axis_0 = maskrcnn.utils.image_padding.random_shift(labels.shape[0], crop_border, fixed_size)
+        pad_axis_1, crop_axis_1, offset_axis_1 = maskrcnn.utils.image_padding.random_shift(labels.shape[1], crop_border, fixed_size)
 
         x = np.pad(x, [pad_axis_0, pad_axis_1, (0, 0)], mode='constant')
         labels = np.pad(labels, [pad_axis_0, pad_axis_1], mode='constant')
@@ -285,8 +290,8 @@ def experiment(dataset, backbone, head, learning_rate, pretrained_lr_factor,
 
         # Apply any padding necessary to ensure that the image is a multiple of BLOCK_SIZE
         image_size = x.shape[:2]
-        padded_image_shape = augmentation.round_up_shape(image_size, BLOCK_SIZE)
-        img_padding = augmentation.compute_padding(image_size, padded_image_shape)
+        padded_image_shape = maskrcnn.utils.image_padding.round_up_shape(image_size, BLOCK_SIZE)
+        img_padding = maskrcnn.utils.image_padding.compute_padding(image_size, padded_image_shape)
 
         x = np.pad(x, img_padding + [(0, 0)], mode=img_pad_mode_np)
         labels = np.pad(labels, img_padding, mode=img_pad_mode_np)
@@ -302,7 +307,7 @@ def experiment(dataset, backbone, head, learning_rate, pretrained_lr_factor,
         # We apply affine transformation to the input image on the GPU using PyTorch grid sampling
         # We must augment the labels on the CPU as we must extract instance masks from the *augmented*
         # label image.
-        xf_cv = augmentation.centre_xf(xf, labels.shape[:2])
+        xf_cv = affine_transforms.centre_xf(xf, labels.shape[:2])
         labels_aug = cv2.warpAffine(labels, xf_cv[0], labels.shape[:2][::-1], flags=cv2.INTER_NEAREST)
 
         # Extract instance masks and boxes
@@ -374,7 +379,7 @@ def experiment(dataset, backbone, head, learning_rate, pretrained_lr_factor,
         # Note that the parameters match those returned by `_prepare_training_image` and `_prepare_training_batch`
         def f_train(X, rpn_match, rpn_bbox, rpn_num_pos, xf, gt_class_ids, gt_boxes, gt_masks, n_gts_per_sample):
             if gt_class_ids.shape[1] > 0 and gt_boxes.shape[1] > 0:
-                xf = augmentation.apply_grid_to_image(augmentation.inv_nx2x3(xf), X.shape[2:])
+                xf = affine_transforms.apply_grid_to_image(affine_transforms.inv_nx2x3(xf), X.shape[2:])
 
                 X_var = torch.tensor(X, dtype=torch.float, device=torch_device)
                 rpn_target_match = torch.tensor(rpn_match, dtype=torch.long, device=torch_device)
@@ -449,7 +454,7 @@ def experiment(dataset, backbone, head, learning_rate, pretrained_lr_factor,
                 # y1, x1, y2, x2
                 window = np.array([[0.0, 0.0, float(image_size[0]), float(image_size[1])]])
                 det_boxes, det_class_ids, det_scores, mask_boxes, mrcnn_mask = net.detect_forward_np(X_var, window)[0]
-                labels, cls_map = inference.mrcnn_detections_to_label_image(
+                labels, cls_map = maskrcnn.utils.inference.mrcnn_detections_to_label_image(
                     image_size, det_scores, det_class_ids, mask_boxes, mrcnn_mask, mask_nms_thresh=mask_nms_thresh)
             return det_boxes, det_scores, det_class_ids, mask_boxes, mrcnn_mask, labels, cls_map
 
@@ -458,7 +463,7 @@ def experiment(dataset, backbone, head, learning_rate, pretrained_lr_factor,
         # Note that the parameters match those returned by `_prepare_training_image` and `_prepare_training_batch`
         def f_train(X, rpn_match, rpn_bbox, rpn_num_pos, xf, gt_class_ids, gt_boxes, gt_masks, n_gts_per_sample):
             if gt_class_ids.shape[1] > 0 and gt_boxes.shape[1] > 0:
-                xf = augmentation.apply_grid_to_image(augmentation.inv_nx2x3(xf), X.shape[2:])
+                xf = affine_transforms.apply_grid_to_image(affine_transforms.inv_nx2x3(xf), X.shape[2:])
 
                 X_var = torch.tensor(X, dtype=torch.float, device=torch_device)
                 rpn_target_match = torch.tensor(rpn_match, dtype=torch.long, device=torch_device)
@@ -537,7 +542,7 @@ def experiment(dataset, backbone, head, learning_rate, pretrained_lr_factor,
         # Note that the parameters match those returned by `_prepare_training_image` and `_prepare_training_batch`
         def f_train(X, rpn_match, rpn_bbox, rpn_num_pos, xf, gt_class_ids, gt_boxes, gt_masks, n_gts_per_sample):
             if gt_class_ids.shape[1] > 0 and gt_boxes.shape[1] > 0:
-                xf = augmentation.apply_grid_to_image(augmentation.inv_nx2x3(xf), X.shape[2:])
+                xf = affine_transforms.apply_grid_to_image(affine_transforms.inv_nx2x3(xf), X.shape[2:])
 
                 X_var = torch.tensor(X, dtype=torch.float, device=torch_device)
                 rpn_target_match = torch.tensor(rpn_match, dtype=torch.long, device=torch_device)
@@ -604,8 +609,8 @@ def experiment(dataset, backbone, head, learning_rate, pretrained_lr_factor,
         image_size = x.shape[:2]
 
         # Read the input image
-        padded_shape = augmentation.round_up_shape(x.shape[:2], BLOCK_SIZE)
-        img_padding = augmentation.compute_padding(x.shape[:2], padded_shape)
+        padded_shape = maskrcnn.utils.image_padding.round_up_shape(x.shape[:2], BLOCK_SIZE)
+        img_padding = maskrcnn.utils.image_padding.compute_padding(x.shape[:2], padded_shape)
 
         if standardisation == 'std':
             x = (x - x.mean(axis=(0, 1), keepdims=True)) / (x.std(axis=(0, 1), keepdims=True) + 1.0e-6)
@@ -670,7 +675,7 @@ def experiment(dataset, backbone, head, learning_rate, pretrained_lr_factor,
                     true_labels = d_test.y[i]
                     n_reals.append(len(np.unique(true_labels[true_labels>0])))
                     n_dets.append(len(np.unique(pred_labels[pred_labels>0])))
-                    prec = inference.mean_precision(d_test.y[i], pred_labels)
+                    prec = maskrcnn.utils.evaluation.mean_precision(d_test.y[i], pred_labels)
                     precs.append(prec)
 
             t2 = time.time()
@@ -709,7 +714,7 @@ def experiment(dataset, backbone, head, learning_rate, pretrained_lr_factor,
                     np.savez_compressed(pred_path, det_scores=det_scores, det_class_ids=det_class_ids, det_boxes=det_boxes)
 
                 if eval_predictions and d_test.y is not None:
-                    (acc, dets, reals) = inference.evaluate_box_predictions_from_labels(
+                    (acc, dets, reals) = maskrcnn.utils.evaluation.evaluate_box_predictions_from_labels(
                         det_boxes[0], d_test.y[i], d_test.X[i].shape[:2])
                     accs.append(acc)
                     n_dets.append(dets)
@@ -752,7 +757,7 @@ def experiment(dataset, backbone, head, learning_rate, pretrained_lr_factor,
                     np.savez_compressed(pred_path, det_scores=det_scores, det_boxes=det_boxes)
 
                 if eval_predictions and d_test.y is not None:
-                    (acc, dets, reals) = inference.evaluate_box_predictions_from_labels(
+                    (acc, dets, reals) = maskrcnn.utils.evaluation.evaluate_box_predictions_from_labels(
                         det_boxes[0], d_test.y[i], d_test.X[i].shape[:2])
                     accs.append(acc)
                     n_dets.append(dets)

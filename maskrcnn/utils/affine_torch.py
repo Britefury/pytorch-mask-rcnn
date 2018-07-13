@@ -1,6 +1,9 @@
 import numpy as np
-import torch, torch.nn.functional as F
-from . import affine_transforms
+import torch
+import torch.nn.functional as F
+
+from maskrcnn.utils import affine_transforms
+
 
 def torch_reflect_grid(x):
     """

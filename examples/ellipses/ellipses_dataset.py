@@ -7,7 +7,7 @@ from scipy.spatial import ConvexHull
 from scipy.spatial.qhull import QhullError
 from skimage.util import img_as_float
 
-from examples.affine_transforms import *
+from maskrcnn.utils.affine_transforms import *
 from examples import settings
 
 
