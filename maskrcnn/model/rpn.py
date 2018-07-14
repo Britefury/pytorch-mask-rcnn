@@ -602,14 +602,14 @@ def build_rpn_targets_balanced(config, anchors, valid_anchors_mask, gt_class_ids
     # RPN Match: 1 = positive anchor, -1 = negative anchor, 0 = neutral
     valid_anchors = anchors[valid_anchors_mask]
     rpn_match = np.full([len(valid_anchors)], RPN_CLS_NEUTRAL, dtype=np.int32)
-    # RPN bounding boxes: [max anchors per image, (dy, dx, log(dh), log(dw))]
-    rpn_bbox = np.zeros((config.RPN_TRAIN_ANCHORS_PER_IMAGE, 4))
+    # RPN bounding box deltas: [max anchors per image, (dy, dx, log(dh), log(dw))]
+    rpn_deltas = np.zeros((config.RPN_TRAIN_ANCHORS_PER_IMAGE, 4))
 
     if len(gt_boxes) == 0:
         # Special case
         rpn_match_all = np.zeros([len(valid_anchors_mask)], dtype=np.int32)
         rpn_match_all.fill(RPN_CLS_NEGATIVE)
-        return rpn_match_all, rpn_bbox, 0
+        return rpn_match_all, rpn_deltas, 0
 
     # Handle COCO crowds
     # A crowd box in COCO is a bounding box around several instances. Exclude
@@ -671,43 +671,30 @@ def build_rpn_targets_balanced(config, anchors, valid_anchors_mask, gt_class_ids
 
     # For positive anchors, compute shift and scale needed to transform them
     # to match the corresponding GT boxes.
-    ids = np.where(rpn_match == RPN_CLS_POSITIVE)[0]
-    ix = 0  # index into rpn_bbox
-    # TODO: use box_refinment() rather than duplicating the code here
-    for i, a in zip(ids, valid_anchors[ids]):
-        # Closest gt box (it might have IoU < 0.7)
-        gt = gt_boxes[anchor_iou_argmax[i]]
+    positive_anchor_ids = np.where(rpn_match == RPN_CLS_POSITIVE)[0]
+    positive_gt = gt_boxes[anchor_iou_argmax[positive_anchor_ids]]
+    positive_anc = valid_anchors[positive_anchor_ids]
 
-        # Convert coordinates to center plus width/height.
-        # GT Box
-        gt_h = gt[2] - gt[0]
-        gt_w = gt[3] - gt[1]
-        gt_center_y = gt[0] + 0.5 * gt_h
-        gt_center_x = gt[1] + 0.5 * gt_w
-        # Anchor
-        a_h = a[2] - a[0]
-        a_w = a[3] - a[1]
-        a_center_y = a[0] + 0.5 * a_h
-        a_center_x = a[1] + 0.5 * a_w
+    # Convert coordinates to center plus width/height.
+    # GT Box
+    positive_gt_size = positive_gt[:, 2:4] - positive_gt[:, 0:2]
+    positive_gt_centre = (positive_gt[:, 0:2] + positive_gt[:, 2:4]) * 0.5
+    # Anchor
+    positive_anc_size = positive_anc[:, 2:4] - positive_anc[:, 0:2]
+    positive_anc_centre = (positive_anc[:, 0:2] + positive_anc[:, 2:4]) * 0.5
 
-        # Compute the bbox refinement that the RPN should predict.
-        rpn_bbox[ix] = [
-            (gt_center_y - a_center_y) / a_h,
-            (gt_center_x - a_center_x) / a_w,
-            np.log(gt_h / a_h),
-            np.log(gt_w / a_w),
-        ]
-        # Normalize
-        if config.RPN_BBOX_USE_STD_DEV:
-            rpn_bbox[ix] /= config.BBOX_STD_DEV
-        ix += 1
+    rpn_deltas[:len(positive_anchor_ids), 0:2] = (positive_gt_centre - positive_anc_centre) / positive_anc_size
+    rpn_deltas[:len(positive_anchor_ids), 2:4] = np.log(positive_gt_size / positive_anc_size)
+
+    if config.RPN_BBOX_USE_STD_DEV:
+        rpn_deltas /= config.BBOX_STD_DEV[None, :]
 
     # Reverse valid anchor selection
     rpn_match_all = np.zeros([len(valid_anchors_mask)], dtype=np.int32)
 
     rpn_match_all[valid_anchors_mask] = rpn_match
 
-    return rpn_match_all, rpn_bbox, np.count_nonzero(rpn_match == RPN_CLS_POSITIVE)
+    return rpn_match_all, rpn_deltas, np.count_nonzero(rpn_match == RPN_CLS_POSITIVE)
 
 
 def build_rpn_targets_all(config, anchors, valid_anchors_mask, gt_class_ids, gt_boxes):
@@ -732,8 +719,8 @@ def build_rpn_targets_all(config, anchors, valid_anchors_mask, gt_class_ids, gt_
     # RPN Match: 1 = positive anchor, -1 = negative anchor, 0 = neutral
     valid_anchors = anchors[valid_anchors_mask]
     rpn_match = np.full([len(valid_anchors)], RPN_CLS_NEUTRAL, dtype=np.int32)
-    # RPN bounding boxes: [n_anchors, (dy, dx, log(dh), log(dw))]
-    rpn_bbox = np.zeros([len(valid_anchors), 4])
+    # RPN bounding box deltas: [n_anchors, (dy, dx, log(dh), log(dw))]
+    rpn_deltas = np.zeros([len(valid_anchors), 4])
 
     if len(gt_boxes) == 0:
         # Special case
@@ -793,33 +780,27 @@ def build_rpn_targets_all(config, anchors, valid_anchors_mask, gt_class_ids, gt_
 
     # Convert coordinates to center plus width/height.
     # GT Box
-    gt_h = gt_boxes_per_pos_anchor[:, 2] - gt_boxes_per_pos_anchor[:, 0]
-    gt_w = gt_boxes_per_pos_anchor[:, 3] - gt_boxes_per_pos_anchor[:, 1]
-    gt_center_y = gt_boxes_per_pos_anchor[:, 0] + 0.5 * gt_h
-    gt_center_x = gt_boxes_per_pos_anchor[:, 1] + 0.5 * gt_w
+    gt_size = gt_boxes_per_pos_anchor[:, 2:4] - - gt_boxes_per_pos_anchor[:, 0:2]
+    gt_centre = (gt_boxes_per_pos_anchor[:, 0:2] + gt_boxes_per_pos_anchor[:, 2:4]) * 0.5
 
     # Anchor
-    a_h = pos_anchors[:, 2] - pos_anchors[:, 0]
-    a_w = pos_anchors[:, 3] - pos_anchors[:, 1]
-    a_center_y = pos_anchors[:, 0] + 0.5 * a_h
-    a_center_x = pos_anchors[:, 1] + 0.5 * a_w
+    anc_size = pos_anchors[:, 2:4] - - pos_anchors[:, 0:2]
+    anc_centre = (pos_anchors[:, 0:2] + pos_anchors[:, 2:4]) * 0.5
 
     # Compute the bbox refinement that the RPN should predict.
-    rpn_bbox[ids, 0] = (gt_center_y - a_center_y) / a_h
-    rpn_bbox[ids, 1] = (gt_center_x - a_center_x) / a_w
-    rpn_bbox[ids, 2] = np.log(gt_h / a_h)
-    rpn_bbox[ids, 3] = np.log(gt_w / a_w)
+    rpn_deltas[ids, 0:2] = (gt_centre - anc_centre) / anc_size
+    rpn_deltas[ids, 2:4] =  np.log(gt_size / anc_size)
 
     # Normalize
     if config.RPN_BBOX_USE_STD_DEV:
-        rpn_bbox[ids] /= config.BBOX_STD_DEV
+        rpn_deltas[ids] /= config.BBOX_STD_DEV
 
     # Reverse valid anchor selection
     rpn_match_all = np.zeros([len(valid_anchors_mask)], dtype=np.int32)
     rpn_match_all[valid_anchors_mask] = rpn_match
 
     rpn_bbox_all = np.zeros([len(valid_anchors_mask), 4], dtype=np.float32)
-    rpn_bbox_all[valid_anchors_mask] = rpn_bbox
+    rpn_bbox_all[valid_anchors_mask] = rpn_deltas
 
     return rpn_match_all, rpn_bbox_all, np.count_nonzero(rpn_match == RPN_CLS_POSITIVE)
 
