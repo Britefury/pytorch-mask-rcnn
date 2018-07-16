@@ -66,7 +66,7 @@ import maskrcnn.utils.inference
 @click.option('--hide_progress_bar', is_flag=True, default=True, help='Hide training progress bar')
 @click.option('--subsetseed', type=int, default=12345, help='test set random seed (0 for time based)')
 @click.option('--exp_classes', type=str, default='9', help='Limit to use only samples in experiments in these classes (comma separated)')
-@click.option('--device', type=int, default=0, help='Device')
+@click.option('--device', type=str, default='0', help='Device')
 @click.option('--num_threads', type=int, default=4, help='Number of worker threads')
 def experiment(dataset, backbone, head, learning_rate, pretrained_lr_factor,
                fixed_size, mask_size, rpn_train_anchors_per_image, detection_max_instances,
@@ -96,6 +96,9 @@ def experiment(dataset, backbone, head, learning_rate, pretrained_lr_factor,
     scale_x_range = cmdline_helpers.colon_separated_range(scale_x_range)
     scale_y_range = cmdline_helpers.colon_separated_range(scale_y_range)
     exp_classes = cmdline_helpers.comma_separated_values(exp_classes, int)
+
+    device = cmdline_helpers.comma_separated_values(device, int)
+    multi_gpu = len(device) > 1
 
     _PAD_MODE_TO_NP = {
         'reflect': 'reflect',
@@ -187,7 +190,7 @@ def experiment(dataset, backbone, head, learning_rate, pretrained_lr_factor,
     num_classes = 2
 
 
-    torch_device = torch.device('cuda', device)
+    torch_device = torch.device('cuda', device[0])
 
     if num_threads > 0:
         pool = work_pool.WorkerThreadPool(num_threads)
@@ -217,6 +220,13 @@ def experiment(dataset, backbone, head, learning_rate, pretrained_lr_factor,
     #
 
     net = smallobj_network_architectures.build_network(backbone, head, config_params=config_params).cuda()
+
+    if per_sample_loss:
+        net_train_loss_forward = net.train_loss_forward
+        if multi_gpu:
+            net_train_loss_forward = torch.nn.DataParallel(net_train_loss_forward)
+    else:
+        net_train_loss_forward = None
 
     BLOCK_SIZE = net.BLOCK_SIZE
 
@@ -405,7 +415,7 @@ def experiment(dataset, backbone, head, learning_rate, pretrained_lr_factor,
                     # Run object detection and get per-sample loss
                     rpn_num_pos = torch.tensor(rpn_num_pos, dtype=torch.int, device=torch_device)
                     n_gts_per_sample = torch.tensor(n_gts_per_sample, dtype=torch.int, device=torch_device)
-                    rpn_class_loss, rpn_bbox_loss, mrcnn_class_loss, mrcnn_bbox_loss, mrcnn_mask_loss = net.train_loss_forward(
+                    rpn_class_loss, rpn_bbox_loss, mrcnn_class_loss, mrcnn_bbox_loss, mrcnn_mask_loss = net_train_loss_forward(
                         X_aug, rpn_target_match, rpn_target_bbox, rpn_num_pos,
                         gt_class_ids_var, gt_boxes_var, gt_masks_var, n_gts_per_sample)
 
@@ -488,7 +498,7 @@ def experiment(dataset, backbone, head, learning_rate, pretrained_lr_factor,
                     # Run object detection and get per-sample loss
                     rpn_num_pos = torch.tensor(rpn_num_pos, dtype=torch.int, device=torch_device)
                     n_gts_per_sample = torch.tensor(n_gts_per_sample, dtype=torch.int, device=torch_device)
-                    rpn_class_loss, rpn_bbox_loss, rcnn_class_loss, rcnn_bbox_loss = net.train_loss_forward(
+                    rpn_class_loss, rpn_bbox_loss, rcnn_class_loss, rcnn_bbox_loss = net_train_loss_forward(
                         X_aug, rpn_target_match, rpn_target_bbox, rpn_num_pos,
                         gt_class_ids_var, gt_boxes_var, n_gts_per_sample)
 
@@ -565,7 +575,7 @@ def experiment(dataset, backbone, head, learning_rate, pretrained_lr_factor,
                     # Run object detection and get per-sample loss
                     rpn_num_pos = torch.tensor(rpn_num_pos, dtype=torch.int, device=torch_device)
                     n_gts_per_sample = torch.tensor(n_gts_per_sample, dtype=torch.int, device=torch_device)
-                    rpn_class_loss, rpn_bbox_loss = net.train_loss_forward(X_aug, rpn_target_match, rpn_target_bbox,
+                    rpn_class_loss, rpn_bbox_loss = net_train_loss_forward(X_aug, rpn_target_match, rpn_target_bbox,
                                                                            rpn_num_pos)
 
                     rpn_class_loss = rpn_class_loss.mean()
