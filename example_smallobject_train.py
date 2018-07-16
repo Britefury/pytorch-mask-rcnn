@@ -219,7 +219,7 @@ def experiment(dataset, backbone, head, learning_rate, pretrained_lr_factor,
     # Build network
     #
 
-    net = smallobj_network_architectures.build_network(backbone, head, config_params=config_params).cuda()
+    net = smallobj_network_architectures.build_network(backbone, head, config_params=config_params).to(torch_device)
 
     if per_sample_loss:
         net_train_loss_forward = net.train_loss_forward
