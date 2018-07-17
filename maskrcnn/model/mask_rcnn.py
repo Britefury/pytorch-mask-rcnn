@@ -1027,11 +1027,11 @@ class AbstractMaskRCNNModel (FasterRCNNBaseModel):
         if is_empty(det_boxes) or is_empty(det_class_ids) or is_empty(det_scores):
             # No detections
             n_images = images.shape[0]
-            return [(np.zeros((n_images, 0, 4), dtype=np.float32),
-                     np.zeros((n_images, 0), dtype=int),
-                     np.zeros((n_images, 0), dtype=np.float32),
-                     np.zeros((n_images, 0, 4), dtype=np.float32),
-                     np.zeros((n_images, 0) + tuple(self.config.MASK_SHAPE), dtype=np.float32))
+            return [(np.zeros((1, 0, 4), dtype=np.float32),
+                     np.zeros((1, 0), dtype=int),
+                     np.zeros((1, 0), dtype=np.float32),
+                     np.zeros((1, 0, 4), dtype=np.float32),
+                     np.zeros((1, 0) + tuple(self.config.MASK_SHAPE), dtype=np.float32))
                     for i in range(n_images)]
 
         # Convert to numpy

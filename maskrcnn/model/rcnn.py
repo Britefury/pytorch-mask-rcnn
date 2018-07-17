@@ -1224,13 +1224,13 @@ class AbstractFasterRCNNModel (FasterRCNNBaseModel):
         if is_empty(det_boxes) or is_empty(det_class_ids) or is_empty(det_scores):
             # No detections
             n_images = images.shape[0]
-            empty_dets = [(np.zeros((n_images, 0, 4), dtype=np.float32),
-                           np.zeros((n_images, 0), dtype=int),
-                           np.zeros((n_images, 0), dtype=np.float32))
+            empty_dets = [(np.zeros((1, 0, 4), dtype=np.float32),
+                           np.zeros((1, 0), dtype=int),
+                           np.zeros((1, 0), dtype=np.float32))
                           for i in range(n_images)]
             if return_rpn_rois:
-                empty_rpn_outs = [(np.zeros((n_images, 0, 4), dtype=np.float32),
-                                   np.zeros((n_images, 0), dtype=np.float32))
+                empty_rpn_outs = [(np.zeros((1, 0, 4), dtype=np.float32),
+                                   np.zeros((1, 0), dtype=np.float32))
                                   for i in range(n_images)]
                 return empty_dets, empty_rpn_outs
             else:
