@@ -5,6 +5,73 @@ import torch.nn.functional as F
 from maskrcnn.utils import affine_transforms
 
 
+def t_identity_xf(N, torch_device):
+    """
+    Construct N identity 2x3 transformation matrices
+    :return: Torch tensor of shape (N, 2, 3)
+    """
+    xf = torch.zeros([N, 2, 3], dtype=torch.float, device=torch_device)
+    xf[:, 0, 0] = xf[:, 1, 1] = 1.0
+    return xf
+
+def t_inv_nx2x2(X):
+    """
+    Invert the N 2x2 transformation matrices stored in X; a (N,2,2) torch tensor
+    :param X: transformation matrices to invert, (N,2,2) array
+    :return: inverse of X
+    """
+    rdet = 1.0 / (X[:, 0, 0] * X[:, 1, 1] - X[:, 1, 0] * X[:, 0, 1])
+    y = torch.zeros_like(X)
+    y[:, 0, 0] = X[:, 1, 1] * rdet
+    y[:, 1, 1] = X[:, 0, 0] * rdet
+    y[:, 0, 1] = -X[:, 0, 1] * rdet
+    y[:, 1, 0] = -X[:, 1, 0] * rdet
+    return y
+
+def t_inv_nx2x3(m):
+    """
+    Invert the N 2x3 transformation matrices stored in X; a (N,2,3) array
+    :param X: transformation matrices to invert, (N,2,3) array
+    :return: inverse of X
+    """
+    m2 = m[:, :, :2]
+    mx = m[:, :, 2:3]
+    m2inv = t_inv_nx2x2(m2)
+    mxinv = torch.matmul(m2inv, -mx)
+    return torch.cat([m2inv, mxinv], dim=2)
+
+def t_cat_nx2x3_2(a, b):
+    """
+    Multiply the N 2x3 transformations stored in `a` with those in `b`
+    :param a: transformation matrices, (N,2,3) array
+    :param b: transformation matrices, (N,2,3) array
+    :return: `a . b`
+    """
+    a2 = a[:, :, :2]
+    b2 = b[:, :, :2]
+
+    ax = a[:, :, 2:3]
+    bx = b[:, :, 2:3]
+
+    ab2 = torch.matmul(a2, b2)
+    abx = ax + torch.matmul(a2, bx)
+    return torch.cat([ab2, abx], dim=2)
+
+def t_cat_nx2x3(*x):
+    """
+    Multiply the N 2x3 transformations stored in the arrays in `x`
+    :param x: transformation matrices, tuple of (N,2,3) arrays
+    :return: `x[0] . x[1] . ... . x[N-1]`
+    """
+    y = x[0]
+    for i in range(1, len(x)):
+        y = t_cat_nx2x3_2(y, x[i])
+    return y
+
+def t_transform_points(xf, points):
+    return torch.matmul(xf[:2, :2], points.permute(1, 0)).permute(1, 0) + xf[:, 2][None, :]
+
+
 def torch_reflect_grid(x):
     """
     Apply reflection padding to co-ordinates that are to be used by `torch.nn.functional.grid_sample`
