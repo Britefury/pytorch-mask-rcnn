@@ -114,13 +114,24 @@ def rotation_matrices(thetas):
 
 def transform_points(xf, points_xy):
     """
-    Apply the transformation matrix `xf` to the points in `points`.
+    Apply the transformation matrix `xf` to the points in `points_xy`.
 
     :param xf: transformation as a (2, 3) NumPy array
     :param points_xy: points as a (N, 2) array where each point is of the form (x, y), not (y, x)
     :return: (N, 2) array
     """
     return np.tensordot(xf[:2, :2], points_xy, [[1], [1]]).T + xf[:, 2][None, :]
+
+def transform_vectors(xf, vectors_xy):
+    """
+    Apply the transformation matrix `xf` to the vectors in `vectors_xy`.
+    Like `transform_points` except that the translation component of `xf` is not applied.
+
+    :param xf: transformation as a (2, 3) NumPy array
+    :param vectors_xy: vectors as a (N, 2) array where each vector is of the form (x, y), not (y, x)
+    :return: (N, 2) array
+    """
+    return np.tensordot(xf[:2, :2], vectors_xy, [[1], [1]]).T
 
 def centre_xf(xf, size):
     """

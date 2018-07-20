@@ -68,8 +68,26 @@ def t_cat_nx2x3(*x):
         y = t_cat_nx2x3_2(y, x[i])
     return y
 
-def t_transform_points(xf, points):
-    return torch.matmul(xf[:2, :2], points.permute(1, 0)).permute(1, 0) + xf[:, 2][None, :]
+def t_transform_points(xf, points_xy):
+    """
+    Apply the transformation matrix `xf` to the points in `points_xy`.
+
+    :param xf: transformation as a (2, 3) Torch tensor
+    :param points_xy: points as a (N, 2) Torch tensor where each point is of the form (x, y), not (y, x)
+    :return: (N, 2) Torch Tensor
+    """
+    return torch.matmul(xf[:2, :2], points_xy.permute(1, 0)).permute(1, 0) + xf[:, 2][None, :]
+
+def t_transform_vectors(xf, vectors_xy):
+    """
+    Apply the transformation matrix `xf` to the vectors in `vectors_xy`.
+    Like `transform_points` except that the translation component of `xf` is not applied.
+
+    :param xf: transformation as a (2, 3) Torch tensor
+    :param vectors_xy: vectors as a (N, 2) Torch tensor where each vector is of the form (x, y), not (y, x)
+    :return: (N, 2) Torch tensor
+    """
+    return torch.matmul(xf[:2, :2], vectors_xy.permute(1, 0)).permute(1, 0)
 
 
 def torch_reflect_grid(x):
