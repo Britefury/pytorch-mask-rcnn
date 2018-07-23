@@ -8,6 +8,7 @@ from scipy.spatial.qhull import QhullError
 from skimage.util import img_as_float
 
 from maskrcnn.utils.affine_transforms import *
+from maskrcnn.utils.ground_truths import label_image_to_boundaries
 from examples import settings
 
 
@@ -97,28 +98,6 @@ def random_groups(n_groups, n_objects_per_group, image_size, rot_range, size_ran
     return np.concatenate(all_m, axis=0)
 
 
-def label_hulls(labels):
-    sample_convex_hulls = [None]
-
-    for label_i in range(1, labels.max() + 1):
-        mask = labels == label_i
-        mask_y, mask_x = np.where(mask)
-        mask_points = np.append(mask_y[:, None], mask_x[:, None], axis=1)
-        if len(mask_points) > 0:
-            try:
-                hull = ConvexHull(mask_points)
-            except QhullError:
-                raise
-            else:
-                ch_points = mask_points[hull.vertices, :]
-        else:
-            ch_points = np.zeros((0, 2))
-
-        sample_convex_hulls.append(ch_points)
-
-    return sample_convex_hulls
-
-
 def make_sample(image_size, n_random_objects=20, n_groups=4, n_objs_per_group=7, size_range=(10.0, 16.0),
                 aspect_bound=4.0, n_circle_verts=65, rng=None):
     rng = _get_rng(rng)
@@ -152,13 +131,13 @@ def make_sample(image_size, n_random_objects=20, n_groups=4, n_objs_per_group=7,
         y = np.array(label_img)
 
         try:
-            hulls = label_hulls(y)
+            boundaries = label_image_to_boundaries(y)
         except QhullError:
             draw_objects = True
         else:
             draw_objects = False
 
-    return x, y, hulls
+    return x, y, boundaries
 
 
 class EllipsesDataset (object):

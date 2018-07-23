@@ -1,5 +1,46 @@
 import numpy as np
 import skimage.transform
+from scipy.spatial import ConvexHull
+from scipy.spatial.qhull import QhullError
+
+
+def label_image_to_boundaries(labels):
+    """
+    Convert a label image to a list of label boundaries, where each boundary is a (N, [y, x]) array that lists
+    the points on the boundary.
+
+    Attempts to use `scipy.spatial.ConvexHull` to select the points that lie on the convex hull, uses all
+    points that lie within the label otherwise.
+
+    The returned list will be:
+    `[None, boundary_1, boundary_2, .... boundary_N]` where `boundary_N` corresponds to the label whose pixels have
+    a value of `N`.
+
+    :param labels: a label image as a (height, width) NumPy integer array
+    :return: list of (N,2) NumPy arrays. Element 0 will be None, after which there will be one array for each
+        non-zero region in `labels`, e.g. the boundary for pixels with a value of 1 in `labels` will be at index 1
+    """
+    sample_convex_hulls = [None]
+
+    for label_i in range(1, labels.max() + 1):
+        mask = labels == label_i
+        mask_y, mask_x = np.where(mask)
+        mask_points = np.append(mask_y[:, None] + 0.5, mask_x[:, None] + 0.5, axis=1)
+        if len(mask_points) > 0:
+            # Compute the convex hull to filter out interior points
+            try:
+                hull = ConvexHull(mask_points)
+            except QhullError:
+                # Could not construct convex hull; use all points
+                ch_points = mask_points
+            else:
+                ch_points = mask_points[hull.vertices, :]
+        else:
+            ch_points = np.zeros((0, 2))
+
+        sample_convex_hulls.append(ch_points)
+
+    return sample_convex_hulls
 
 
 def _object_mask_to_gt(image_size, object_mask, mini_mask_shape=None):
