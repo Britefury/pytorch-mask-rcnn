@@ -595,13 +595,13 @@ class CocoMaskRCNN(AbstractMaskRCNNModel):
                                                 volatile=True)
         image_windows_t = torch.autograd.Variable(torch.from_numpy(image_windows).float().cuda(), volatile=True)
 
-        det_boxes, det_class_ids, det_scores, mrcnn_mask = self.detect_forward(molded_images_t, image_windows_t)[0]
+        dets = self.detect_forward_np(molded_images_t, image_windows_t)
 
         # Process detections
         results = []
         for i, image in enumerate(images):
             final_rois, final_class_ids, final_scores, final_masks = \
-                self.unmold_detections(det_boxes[i], det_class_ids[i], det_scores[i], mrcnn_mask[i],
+                self.unmold_detections(dets[i].boxes, dets[i].class_ids, dets[i].scores, dets[i].masks,
                                        image.shape, image_windows[i])
             results.append({
                 "rois": final_rois,

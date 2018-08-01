@@ -8,6 +8,7 @@ from torch.nn import functional as F
 import maskrcnn.utils.image_padding
 from maskrcnn.utils import affine_transforms, image_padding
 from maskrcnn.model.utils import compute_overlaps
+from maskrcnn.model.detections import MaskRCNNDetections
 
 
 def mrcnn_transformed_image_padding(image_size, xf, net_block_size):
@@ -66,7 +67,7 @@ def mrcnn_augmented_detections(net, x, xf, net_block_size):
     :param net_block_size: the network block size; image will be rounded up to this before passing to
         network for inference
     :return: `(detections, misc_detect, xf_padded, inv_xf_padded, padded_shape)`
-        detections: detections returned by `net.detect_forward`
+        detections: detections returned by `net.detect_forward_np`
         misc_detect: misc detection data returned by `net.detect_forward`
         xf_padded: augmentation transformation with padding; useful if you want to invert the augmentation present in
             e.g misc_detect
@@ -113,7 +114,10 @@ def deaugment_mrcnn_detections(detections, inv_xf_padded):
             they have different sizes
     """
     # Get detections for image 0 in augmented space
-    det_boxes_aug, det_class_ids, det_scores, mrcnn_mask_aug = detections[0]
+    det_boxes_aug = detections[0].boxes
+    det_class_ids = detections[0].class_ids
+    det_scores = detections[0].scores
+    mrcnn_mask_aug = detections[0].masks
 
     # Get corners of detection boxes
     det_aug_xy_00 = np.stack([det_boxes_aug[0, :, None, 1], det_boxes_aug[0, :, None, 0]], axis=2)
@@ -154,11 +158,12 @@ def deaugment_mrcnn_detections(detections, inv_xf_padded):
     mrcnn_mask = []
     for det_i in range(len(det_boxes_int)):
         y1, x1, y2, x2 = det_boxes_int[det_i]
-        mask_aug = mrcnn_mask_aug[0, det_i, :, :, det_class_ids[0, det_i]]
+        mask_aug = mrcnn_mask_aug[0, det_i, :, :]
         img_mask = cv2.warpAffine(mask_aug, mask_matrices[det_i], (x2 - x1, y2 - y1))
         mrcnn_mask.append(img_mask)
 
-    return det_boxes_int, det_class_ids[0], det_scores[0], mrcnn_mask
+    return MaskRCNNDetections(boxes=det_boxes_int, class_ids=det_class_ids[0], scores=det_scores[0],
+                              masks=mrcnn_mask)
 
 
 def mrcnn_augmented_detections_to_label_image(image_size, det_scores, det_class_id, det_boxes, mrcnn_mask,

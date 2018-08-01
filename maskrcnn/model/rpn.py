@@ -4,6 +4,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from maskrcnn.nms.nms_wrapper import nms
+from .detections import RPNDetections
 from .utils import SamePad2d, compute_overlaps, concatenate_detections, split_detections, torch_tensor_to_int_list
 
 ############################################################
@@ -1173,9 +1174,10 @@ class AbstractRPNNModel (RPNBaseModel):
 
         :param images: Tensor of images
 
-        :return: (det_boxes, det_scores, n_rois_per_sample) where
-            rpn_rois: [batch, n_rois_after_nms, 4] detection boxes; dim 1 may be zero-padded
-            det_scores: [batch, n_rois_after_nms] detection confidence scores; dim 1 may be zero-padded
+        :return: (detections, n_rois_per_sample) where
+            detections: `RPNDetections` named tuple that has the following attributes:
+                boxes: [batch, n_rois_after_nms, 4] detection boxes; dim 1 may be zero-padded
+                scores: [batch, n_rois_after_nms] detection confidence scores; dim 1 may be zero-padded
             n_dets_per_sample: [batch] number of rois per sample in the batch
         """
         device = images.device
@@ -1189,7 +1191,7 @@ class AbstractRPNNModel (RPNBaseModel):
 
         det_boxes = det_boxes_nrm * scale[None, None, :]
 
-        return det_boxes, det_scores, n_dets_per_sample
+        return RPNDetections(boxes=det_boxes, scores=det_scores), n_dets_per_sample
 
 
     def detect_forward_np(self, images):
@@ -1198,14 +1200,14 @@ class AbstractRPNNModel (RPNBaseModel):
         :param images: Tensor of images
 
         :return: [detection0, detection1, ... detectionN] List of detections, one per sample, where each
-                detection is a tuple of:
-            (det_boxes, det_scores) where:
-            det_boxes: [1, detections, [y1, x1, y2, x2]] NumPy array
-            det_scores: [1, detections] NumPy array
+            detection is an `RPNDetections` named tuple that has the following attributes:
+                boxes: [1, detections, [y1, x1, y2, x2]] NumPy array
+                scores: [1, detections] NumPy array
         """
-        det_boxes, det_scores, n_dets_per_sample = self.detect_forward(images)
+        t_dets, n_dets_per_sample = self.detect_forward(images)
 
-        det_boxes_np = det_boxes.cpu().numpy()
-        det_scores_np = det_scores.cpu().numpy()
+        det_boxes_np = t_dets.boxes.cpu().numpy()
+        det_scores_np = t_dets.scores.cpu().numpy()
 
-        return split_detections(n_dets_per_sample, det_boxes_np, det_scores_np)
+        dets = split_detections(n_dets_per_sample, det_boxes_np, det_scores_np)
+        return [RPNDetections(boxes=d[0], scores=d[1]) for d in dets]

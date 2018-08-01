@@ -7,6 +7,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from maskrcnn.roialign.crop_and_resize.crop_and_resize import CropAndResizeAligned
+from .detections import MaskRCNNDetections
 from .utils import not_empty, is_empty, box_refinement, SamePad2d, concatenate_detections, flatten_detections,\
     unflatten_detections, split_detections, torch_tensor_to_int_list
 from .rpn import compute_rpn_losses, compute_rpn_losses_per_sample, alt_forward_method
@@ -975,14 +976,15 @@ class AbstractMaskRCNNModel (FasterRCNNBaseModel):
         :param image_windows: tensor of image windows where each row is [y1, x1, y2, x2]
         :param override_class: int or None; override class ID to always be this class
 
-        :return: (det_boxes, det_class_ids, det_scores, mrcnn_mask, n_dets_per_sample) where
-            det_boxes: [batch, detection, 4] detection boxes
-            det_class_ids: [batch, detection] detection class IDs
-            roi_scores: [batch, detection] detection confidence scores
-            mask_boxes: [batch, detection, 4] mask boxes (will be enlarged versions of det_boxes if
-                mask box enlargement is enabled in the configuration, otherwise mask_boxes and det_boxes will
-                be the same)
-            mrcnn_mask: [batch, detection, height, width] mask detections
+        :return: (detections, n_dets_per_sample) where
+            detections: an `MaskRCNNDetections` named tuple that has the following attributes:
+                boxes: [batch, detection, 4] detection boxes
+                class_ids: [batch, detection] detection class IDs
+                scores: [batch, detection] detection confidence scores
+                mask_boxes: [batch, detection, 4] mask boxes (will be enlarged versions of det_boxes if
+                    mask box enlargement is enabled in the configuration, otherwise mask_boxes and det_boxes will
+                    be the same)
+                masks: [batch, detection, height, width] mask detections
             n_dets_per_sample: [batch] number of detections per sample in the batch
         """
         image_size = images.shape[2:]
@@ -1000,7 +1002,8 @@ class AbstractMaskRCNNModel (FasterRCNNBaseModel):
         mask_boxes, mrcnn_mask = self.mask_detect_forward(
             image_size, image_windows, mrcnn_feature_maps, det_boxes, det_class_ids, n_dets_per_sample)
 
-        return det_boxes, det_class_ids, det_scores,mask_boxes,  mrcnn_mask, n_dets_per_sample
+        return MaskRCNNDetections(boxes=det_boxes, class_ids=det_class_ids, scores=det_scores,
+                                  mask_boxes=mask_boxes, masks=mrcnn_mask), n_dets_per_sample
 
 
     def detect_forward_np(self, images, image_windows, override_class=None):
@@ -1020,26 +1023,27 @@ class AbstractMaskRCNNModel (FasterRCNNBaseModel):
                 be the same)
             mrcnn_mask: [1, detections, height, width] mask detections
         """
-        det_boxes, det_class_ids, det_scores, mask_boxes, mrcnn_mask, n_dets_per_sample = self.detect_forward(
-            images, image_windows, override_class=override_class)
+        t_dets, n_dets_per_sample = self.detect_forward(images, image_windows, override_class=override_class)
 
 
-        if is_empty(det_boxes) or is_empty(det_class_ids) or is_empty(det_scores):
+        if is_empty(t_dets.boxes) or is_empty(t_dets.class_ids) or is_empty(t_dets.scores):
             # No detections
             n_images = images.shape[0]
-            return [(np.zeros((1, 0, 4), dtype=np.float32),
-                     np.zeros((1, 0), dtype=int),
-                     np.zeros((1, 0), dtype=np.float32),
-                     np.zeros((1, 0, 4), dtype=np.float32),
-                     np.zeros((1, 0) + tuple(self.config.MASK_SHAPE), dtype=np.float32))
+            return [MaskRCNNDetections(boxes=np.zeros((1, 0, 4), dtype=np.float32),
+                                       class_ids=np.zeros((1, 0), dtype=int),
+                                       scores=np.zeros((1, 0), dtype=np.float32),
+                                       mask_boxes=np.zeros((1, 0, 4), dtype=np.float32),
+                                       masks=np.zeros((1, 0) + tuple(self.config.MASK_SHAPE), dtype=np.float32))
                     for i in range(n_images)]
 
         # Convert to numpy
-        det_boxes_np = det_boxes.data.cpu().numpy()
-        det_class_ids_np = det_class_ids.data.cpu().numpy()
-        det_scores_np = det_scores.data.cpu().numpy()
-        mask_boxes_np = mask_boxes.cpu().numpy()
-        mrcnn_mask_np = mrcnn_mask.cpu().numpy()
+        det_boxes_np = t_dets.boxes.data.cpu().numpy()
+        det_class_ids_np = t_dets.class_ids.data.cpu().numpy()
+        det_scores_np = t_dets.scores.data.cpu().numpy()
+        mask_boxes_np = t_dets.mask_boxes.cpu().numpy()
+        mrcnn_mask_np = t_dets.masks.cpu().numpy()
 
-        return split_detections(n_dets_per_sample, det_boxes_np, det_class_ids_np, det_scores_np, mask_boxes_np,
+        dets = split_detections(n_dets_per_sample, det_boxes_np, det_class_ids_np, det_scores_np, mask_boxes_np,
                                 mrcnn_mask_np)
+        return [MaskRCNNDetections(boxes=d[0], class_ids=d[1], scores=d[2], mask_boxes=d[3], masks=d[4])
+                for d in dets]

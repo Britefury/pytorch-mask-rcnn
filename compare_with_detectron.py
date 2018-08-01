@@ -275,14 +275,13 @@ with torch.no_grad():
     # rpn_rois are in normalized co-ordinates
     rpn_boxes = rpn_rois[0].cpu().numpy() * scale
 
-    [[rcnn_boxes_np, rcnn_class_ids_np, rcnn_scores_np, mrcnn_mask]] = net.detect_forward(
+    [det] = net.detect_forward_np(
         x_var, torch.tensor([[0.0, 0.0, im_h, im_w]]).float().cuda()
     )
-    rcnn_boxes_np = rcnn_boxes_np[0]
-    rcnn_class_ids_np = rcnn_class_ids_np[0]
-    rcnn_scores_np = rcnn_scores_np[0]
-    mrcnn_mask = mrcnn_mask[0]
-    mrcnn_mask = mrcnn_mask[np.arange(len(mrcnn_mask)), :, :, rcnn_class_ids_np]
+    rcnn_boxes_np = det.boxes[0]
+    rcnn_class_ids_np = det.class_ids[0]
+    rcnn_scores_np = det.scores[0]
+    mrcnn_mask = det.masks[0]
     print('rcnn_boxes_np.shape={}, rcnn_class_ids_np.shape={}, rcnn_scores_np.shape={}, mrcnn_mask.shape={}'.format(
         rcnn_boxes_np.shape, rcnn_class_ids_np.shape, rcnn_scores_np.shape, mrcnn_mask.shape
     ))
