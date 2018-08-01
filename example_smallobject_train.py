@@ -465,8 +465,8 @@ def experiment(dataset, backbone, head, learning_rate, pretrained_lr_factor,
                 window = np.array([[0.0, 0.0, float(image_size[0]), float(image_size[1])]])
                 det_boxes, det_class_ids, det_scores, mask_boxes, mrcnn_mask = net.detect_forward_np(X_var, window)[0]
                 labels, cls_map = maskrcnn.utils.inference.mrcnn_detections_to_label_image(
-                    image_size, det_scores, det_class_ids, mask_boxes, mrcnn_mask, mask_nms_thresh=mask_nms_thresh)
-            return det_boxes, det_scores, det_class_ids, mask_boxes, mrcnn_mask, labels, cls_map
+                    image_size, det_class_ids, det_scores, mask_boxes, mrcnn_mask, mask_nms_thresh=mask_nms_thresh)
+            return det_boxes, det_class_ids, det_scores, mask_boxes, mrcnn_mask, labels, cls_map
 
     elif head == 'faster_rcnn':
         # Train on a single batch
@@ -545,7 +545,7 @@ def experiment(dataset, backbone, head, learning_rate, pretrained_lr_factor,
                 # y1, x1, y2, x2
                 window = np.array([[0.0, 0.0, float(image_size[0]), float(image_size[1])]])
                 det_boxes, det_class_ids, det_scores = net.detect_forward_np(X_var, window)[0]
-            return det_boxes, det_scores, det_class_ids
+            return det_boxes, det_class_ids, det_scores
 
     elif head == 'rpn':
         # Train on a single batch
@@ -653,7 +653,7 @@ def experiment(dataset, backbone, head, learning_rate, pretrained_lr_factor,
                 os.makedirs(plot_dir, exist_ok=True)
             for i in test_indices:
                 i = int(i)
-                det_boxes, det_scores, det_class_ids, mask_boxes, mrcnn_mask, pred_labels, cls_map = predict_image(
+                det_boxes, det_class_ids, det_scores, mask_boxes, mrcnn_mask, pred_labels, cls_map = predict_image(
                     d_test.X[i])
 
                 if plot_dir != '':
@@ -708,7 +708,7 @@ def experiment(dataset, backbone, head, learning_rate, pretrained_lr_factor,
                 os.makedirs(plot_dir, exist_ok=True)
             for i in test_indices:
                 i = int(i)
-                det_boxes, det_scores, det_class_ids = predict_image(d_test.X[i])
+                det_boxes, det_class_ids, det_scores = predict_image(d_test.X[i])
 
                 if plot_dir != '':
                     plot_path = os.path.join(plot_dir, 'detections_{:04d}_epoch{:04d}.png'.format(i, epoch))
