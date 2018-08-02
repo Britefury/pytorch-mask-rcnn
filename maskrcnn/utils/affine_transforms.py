@@ -232,6 +232,35 @@ def apply_grid_to_image(mtx, size):
     asp, asp_inv = grid_to_image_size_nx2x3(len(mtx), size)
     return cat_nx2x3(asp_inv, cat_nx2x3(mtx, asp))
 
+def cv_to_torch(mtx, size):
+    """
+    Convert transformation matrix that can be used by `cv2.warpAffine` to work with PyTorch grid sampleing
+
+    :param mtx: transformation matrices as a `(N,2,3)` arrays
+    :param size: image size as a `(height, width)` tuple
+    :return: corrected matrices as a `(N,2,3)` array
+    """
+    scale_y = float(size[0] - 1) / 2.0
+    scale_x = float(size[1] - 1) / 2.0
+
+    N = len(mtx)
+
+    # OpenCV transformations modify the image grid, whereas PyTorch sampling uses sample points, so
+    # we must invert
+    mtx = inv_nx2x3(mtx)
+
+    # Matrix to transform torch grid [-1 to 1] co-ordinates to OpenCV image space
+    torch_cv = identity_xf(N)
+    torch_cv[:, 0, 0] = scale_y
+    torch_cv[:, 1, 1] = scale_x
+    torch_cv[:, 0, 2] = scale_y
+    torch_cv[:, 1, 2] = scale_x
+
+    # Matrix to transform from OpenCV image space back to torch grid
+    cv_torch = inv_nx2x3(torch_cv)
+
+    return cat_nx2x3(cv_torch, cat_nx2x3(mtx, torch_cv))
+
 
 def axis_angle_rotation_matrices(axis, theta):
     """
