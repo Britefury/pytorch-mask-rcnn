@@ -965,8 +965,8 @@ class FasterRCNNBaseModel (RPNBaseModel):
                 rcnn_class.append(rcnn_class_block)
                 rcnn_bbox.append(rcnn_bbox_block)
 
-            rcnn_class = torch.cat(rcnn_class, dim=0)
-            rcnn_bbox = torch.cat(rcnn_bbox, dim=0)
+            rcnn_class = torch.cat(rcnn_class, dim=1)
+            rcnn_bbox = torch.cat(rcnn_bbox, dim=1)
 
         else:
             _, rcnn_class, rcnn_bbox = self.classifier(

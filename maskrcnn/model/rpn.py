@@ -117,26 +117,26 @@ class RPNHead (nn.Module):
 def apply_box_deltas(boxes, deltas):
     """Applies the given deltas to the given boxes.
 
-    :param boxes: [N, 4] where each row is y1, x1, y2, x2
-    :param deltas: [N, 4] where each row is [dy, dx, log(dh), log(dw)]
-    :return: boxes as a [N, 4] tensor
+    :param boxes: [..., 4] where last dimension is y1, x1, y2, x2
+    :param deltas: [..., 4] where last dimension is [dy, dx, log(dh), log(dw)]
+    :return: boxes as a [..., 4] tensor
     """
     # Convert to y, x, h, w
-    height = boxes[:, 2] - boxes[:, 0]
-    width = boxes[:, 3] - boxes[:, 1]
-    center_y = boxes[:, 0] + 0.5 * height
-    center_x = boxes[:, 1] + 0.5 * width
+    height = boxes[..., 2] - boxes[..., 0]
+    width = boxes[..., 3] - boxes[..., 1]
+    center_y = boxes[..., 0] + 0.5 * height
+    center_x = boxes[..., 1] + 0.5 * width
     # Apply deltas
-    center_y += deltas[:, 0] * height
-    center_x += deltas[:, 1] * width
-    height *= torch.exp(deltas[:, 2])
-    width *= torch.exp(deltas[:, 3])
+    center_y += deltas[..., 0] * height
+    center_x += deltas[..., 1] * width
+    height *= torch.exp(deltas[..., 2])
+    width *= torch.exp(deltas[..., 3])
     # Convert back to y1, x1, y2, x2
     y1 = center_y - 0.5 * height
     x1 = center_x - 0.5 * width
     y2 = y1 + height
     x2 = x1 + width
-    result = torch.stack([y1, x1, y2, x2], dim=1)
+    result = torch.stack([y1, x1, y2, x2], dim=-1)
     return result
 
 def clip_boxes(boxes, window):
@@ -149,14 +149,14 @@ def clip_boxes(boxes, window):
 
     """
     boxes = torch.stack( \
-        [boxes[:, 0].clamp(float(window[0]), float(window[2])),
-         boxes[:, 1].clamp(float(window[1]), float(window[3])),
-         boxes[:, 2].clamp(float(window[0]), float(window[2])),
-         boxes[:, 3].clamp(float(window[1]), float(window[3]))], 1)
+        [boxes[..., 0].clamp(float(window[0]), float(window[2])),
+         boxes[..., 1].clamp(float(window[1]), float(window[3])),
+         boxes[..., 2].clamp(float(window[0]), float(window[2])),
+         boxes[..., 3].clamp(float(window[1]), float(window[3]))], dim=-1)
     return boxes
 
-def rpn_preds_to_proposals_one_sample(rpn_pred_probs, rpn_box_deltas, proposal_count, nms_threshold, anchors,
-                                      image_size, pre_nms_limit, config):
+def rpn_preds_to_proposals(rpn_pred_probs, rpn_box_deltas, proposal_count, nms_threshold, anchors,
+                           image_size, pre_nms_limit, config):
     """Receives anchor scores and selects a subset to pass as proposals
     to the second stage. Filtering is done based on anchor scores and
     non-max suppression to remove overlaps. It also applies bounding
@@ -164,44 +164,46 @@ def rpn_preds_to_proposals_one_sample(rpn_pred_probs, rpn_box_deltas, proposal_c
 
     :param rpn_pred_probs: predicted background/foreground probabilities from region proposal network RPN
         Either:
-            (anchors,) array  where the last dimension is [fg_prob] if
+            (sample, anchors,) array  where the last dimension is [fg_prob] if
                 `config.RPN_OBJECTNESS_FUNCTION == 'sigmoid'`
-            else (anchors, 2) array  where the last dimension is [bg_prob, fg_prob]
         Or:
+            (sample, anchors, 2) array  where the last dimension is [bg_prob, fg_prob] otherwise
     :param rpn_box_deltas: predicted bounding box deltas from region proposal network RPN
-        (anchors, 4) array  where the last dimension is [dy, dx, log(dh), log(dw)]
+        (sample, anchors, 4) array  where the last dimension is [dy, dx, log(dh), log(dw)]
     :param proposal_count: maximum number of proposals to be generated
     :param nms_threshold: Non-maximum suppression threshold
     :param anchors: Anchors as a (A,4) Torch tensor
     :param image_size: image size as a (height, width) tuple
     :param pre_nms_limit: number of pre-NMS boxes to consider
     :param config:
-    :return: (normalized_boxes, scores):
-        normalized_boxes: proposals in normalized coordinates [rois, (y1, x1, y2, x2)] (Torch tensor)
-        scores: objectness scores [rois] (Torch tensor)
+    :return: (normalized_boxes, scores, rois_per_sample):
+        normalized_boxes: proposals in normalized coordinates [sample, rois, (y1, x1, y2, x2)] (Torch tensor)
+        scores: objectness scores [sample, rois] (Torch tensor)
+        rois_per_sample: list giving the number of ROIs in each sample
     """
     device = rpn_pred_probs.device
+    n_samples = rpn_pred_probs.shape[0]
 
     # Select scores and deltas corresponding to valid anchors
     if config.n_rpn_logits_per_anchor == 2:
         # Box Scores. Use the foreground class confidence. [Batch, num_rois, 1]
-        scores = rpn_pred_probs[:, 1]
+        scores = rpn_pred_probs[:, :, 1]
     else:
         # Box Scores. Use the foreground class confidence. [Batch, num_rois, 1]
         scores = rpn_pred_probs
 
     # Box deltas [batch, num_rois, 4]
     if config.RPN_BBOX_USE_STD_DEV:
-        std_dev = torch.tensor(np.reshape(config.BBOX_STD_DEV, [1, 4]), requires_grad=False, device=device, dtype=torch.float)
+        std_dev = torch.tensor(np.reshape(config.BBOX_STD_DEV, [1, 1, 4]), requires_grad=False, device=device, dtype=torch.float)
         rpn_box_deltas = rpn_box_deltas * std_dev
 
     # Improve performance by trimming to top anchors by score
     # and doing the rest on the smaller subset.
     pre_nms_limit = min(pre_nms_limit, anchors.size()[0])
-    scores, order = scores.sort(descending=True)
-    order = order[:pre_nms_limit]
-    scores = scores[:pre_nms_limit]
-    rpn_box_deltas = rpn_box_deltas[order, :] # TODO: Support batch size > 1 ff.
+    scores, order = scores.sort(dim=1, descending=True)
+    order = order[:, :pre_nms_limit]
+    scores = scores[:, :pre_nms_limit]
+    rpn_box_deltas = rpn_box_deltas[torch.arange(n_samples, dtype=torch.long)[:, None], order, :]
     anchors = anchors[order, :]
 
     # Apply deltas to anchors to get refined anchors.
@@ -218,52 +220,27 @@ def rpn_preds_to_proposals_one_sample(rpn_pred_probs, rpn_box_deltas, proposal_c
     # for small objects, so we're skipping it.
 
     # Non-max suppression
-    keep = nms(torch.cat((boxes, scores.unsqueeze(1)), 1).detach(), nms_threshold)
-    keep = keep[:proposal_count]
-    boxes = boxes[keep, :]
-    scores = scores[keep]
+    retained = []
+    rois_per_sample = []
+    max_n_rois = 0
+    for sample_i in range(n_samples):
+        keep = nms(torch.cat((boxes[sample_i], scores[sample_i].unsqueeze(1)), 1).detach(), nms_threshold)
+        keep = keep[:proposal_count]
+        n_rois = keep.shape[0]
+        max_n_rois = max(max_n_rois, n_rois)
+        retained.append(keep)
+        rois_per_sample.append(n_rois)
 
     # Normalize dimensions to range of 0 to 1.
     norm = torch.tensor(np.array([height, width, height, width]), dtype=torch.float, device=device)
-    normalized_boxes = boxes / norm
 
-    return normalized_boxes, scores
+    retained_norm_boxes = torch.zeros(n_samples, max_n_rois, 4, dtype=torch.float, device=device)
+    retained_scores = torch.zeros(n_samples, max_n_rois, dtype=torch.float, device=device)
+    for sample_i, (n_rois, keep) in enumerate(zip(rois_per_sample, retained)):
+        retained_norm_boxes[sample_i, :n_rois, :] = boxes[sample_i, keep, :] / norm
+        retained_scores[sample_i, :n_rois] = scores[sample_i, keep]
 
-
-def rpn_preds_to_proposals(rpn_pred_probs, rpn_box_deltas, proposal_count, nms_threshold, anchors,
-                           image_size, pre_nms_limit, config=None):
-    """Receives anchor scores and selects a subset to pass as proposals
-    to the second stage. Filtering is done based on anchor scores and
-    non-max suppression to remove overlaps. It also applies bounding
-    box refinment detals to anchors.
-
-    :param rpn_pred_probs: predicted background/foreground probabilities from region proposal network RPN
-        (batch, anchors, 2) array  where the last dimension is [bg_prob, fg_prob]
-    :param rpn_box_deltas: predicted bounding box deltas from region proposal network RPN
-        (batch, anchors, 4) array  where the last dimension is [dy, dx, log(dh), log(dw)]
-    :param proposal_count: maximum number of proposals to be generated
-    :param nms_threshold: Non-maximum suppression threshold
-    :param anchors: Anchors as a (A,4) Torch tensor
-    :param image_size: image size as a (height, width) tuple
-    :param pre_nms_limit: number of pre-NMS boxes to consider
-    :param config:
-    :return: (normalized_boxes, scores, n_boxes_per_sample) where
-        normalized_boxes: proposals in normalized coordinates [batch, rois, (y1, x1, y2, x2)] (Torch tensor)
-        scores: proposal objectness scores [batch, rois] (Torch tensor)
-        n_boxes_per_sample: list giving number of ROIs in each sample in the batch
-    """
-    normalized_boxes = []
-    scores = []
-    for sample_i in range(rpn_pred_probs.size()[0]):
-        norm_boxes, sample_scores = rpn_preds_to_proposals_one_sample(rpn_pred_probs[sample_i], rpn_box_deltas[sample_i],
-                                                                      proposal_count, nms_threshold,
-                                                                      anchors, image_size, pre_nms_limit, config)
-        normalized_boxes.append(norm_boxes.unsqueeze(0))
-        scores.append(sample_scores.unsqueeze(0))
-
-    (normalized_boxes, scores), n_boxes_per_sample = concatenate_detections(normalized_boxes, scores)
-
-    return normalized_boxes, scores, n_boxes_per_sample
+    return retained_norm_boxes, retained_scores, rois_per_sample
 
 
 def rpn_preds_to_proposals_by_level(rpn_pred_probs_by_lvl, rpn_box_deltas_by_lvl, proposal_count, nms_threshold, anchors_by_lvl,
@@ -292,32 +269,39 @@ def rpn_preds_to_proposals_by_level(rpn_pred_probs_by_lvl, rpn_box_deltas_by_lvl
         scores: proposal objectness scores [batch, rois] (Torch tensor)
         n_boxes_per_sample: list giving number of ROIs in each sample in the batch
     """
-    normalized_boxes = []
-    scores = []
-    for sample_i in range(rpn_pred_probs_by_lvl[0].size()[0]):
-        sample_nrm_boxes = []
-        sample_scores = []
-        for lvl_i, (rpn_pred_probs, rpn_box_deltas, anchors) in enumerate(zip(
-                rpn_pred_probs_by_lvl, rpn_box_deltas_by_lvl, anchors_by_lvl)):
-            lvl_boxes, lvl_scores = rpn_preds_to_proposals_one_sample(rpn_pred_probs[sample_i], rpn_box_deltas[sample_i],
-                                                                      proposal_count, nms_threshold,
-                                                                      anchors, image_size, pre_nms_limit, config)
-            sample_nrm_boxes.append(lvl_boxes)
-            sample_scores.append(lvl_scores)
-        sample_nrm_boxes = torch.cat(sample_nrm_boxes, 0)
-        sample_scores = torch.cat(sample_scores, 0)
+    n_samples = rpn_pred_probs_by_lvl[0].shape[0]
+    device = rpn_pred_probs_by_lvl[0].device
+    boxes_by_lvl = []
+    scores_by_lvl = []
+    n_rois_per_sample_by_level = []
+    total_n_rois_per_sample = None
+    for lvl_i, (rpn_pred_probs, rpn_box_deltas, anchors) in enumerate(zip(
+            rpn_pred_probs_by_lvl, rpn_box_deltas_by_lvl, anchors_by_lvl)):
+        lvl_boxes, lvl_scores, lvl_rois_per_sample = rpn_preds_to_proposals(
+            rpn_pred_probs, rpn_box_deltas, proposal_count, nms_threshold, anchors, image_size, pre_nms_limit,
+            config=config)
+        boxes_by_lvl.append(lvl_boxes)
+        scores_by_lvl.append(lvl_scores)
+        n_rois_per_sample_by_level.append(lvl_rois_per_sample)
+        if total_n_rois_per_sample is None:
+            total_n_rois_per_sample = lvl_rois_per_sample
+        else:
+            total_n_rois_per_sample = [a + b for a, b in zip(total_n_rois_per_sample, lvl_rois_per_sample)]
+    max_rois_per_sample = max(total_n_rois_per_sample)
+    boxes = torch.zeros(n_samples, max_rois_per_sample, 4, dtype=torch.float, device=device)
+    scores = torch.zeros(n_samples, max_rois_per_sample, dtype=torch.float, device=device)
 
-        sample_scores, order = sample_scores.sort(descending=True)
-        order = order[:proposal_count]
-        sample_scores = sample_scores[:proposal_count]
-        sample_nrm_boxes = sample_nrm_boxes[order, :]
+    pos = [0 for _ in range(n_samples)]
+    for lvl_i, n_rois_per_sample in enumerate(n_rois_per_sample_by_level):
+        for sample_i in range(n_samples):
+            start = pos[sample_i]
+            end = start + n_rois_per_sample[sample_i]
+            boxes[sample_i, start:end, :] = boxes_by_lvl[lvl_i][sample_i, :n_rois_per_sample[sample_i], :]
+            scores[sample_i, start:end] = scores_by_lvl[lvl_i][sample_i, :n_rois_per_sample[sample_i]]
+            pos[sample_i] = end
 
-        normalized_boxes.append(sample_nrm_boxes.unsqueeze(0))
-        scores.append(sample_scores.unsqueeze(0))
 
-    (normalized_boxes, scores), n_boxes_per_sample = concatenate_detections(normalized_boxes, scores)
-
-    return normalized_boxes, scores, n_boxes_per_sample
+    return boxes, scores, total_n_rois_per_sample
 
 
 ############################################################
