@@ -71,6 +71,9 @@ class Config(object):
     # Number of hidden channels in RPN
     RPN_HIDDEN_CHANNELS = 256
 
+    # Use batch-norm in RPN
+    RPN_BATCH_NORM = False
+
     # RPN Objectness function
     # 'sigmoid' - single logit, sigmoid non-linearity, binary cross-entropy loss
     # 'softmax' - 2 logits, softmax non-linearity, categorical cross-entropy loss

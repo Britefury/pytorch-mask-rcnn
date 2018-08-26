@@ -39,6 +39,10 @@ class RPNHead (nn.Module):
         else:
             self.padding = SamePad2d(kernel_size=3, stride=self.anchor_stride)
             self.conv_shared = nn.Conv2d(self.depth, config.RPN_HIDDEN_CHANNELS, kernel_size=3, stride=self.anchor_stride)
+        if config.RPN_BATCH_NORM:
+            self.conv_shared_bn = nn.BatchNorm2d(config.RPN_HIDDEN_CHANNELS)
+        else:
+            self.conv_shared_bn = None
         self.relu = nn.ReLU(inplace=True)
         self.conv_class = nn.Conv2d(config.RPN_HIDDEN_CHANNELS,
                                     config.n_rpn_logits_per_anchor * anchors_per_location,
@@ -53,7 +57,10 @@ class RPNHead (nn.Module):
         # Shared convolutional base of the RPN
         if self.padding is not None:
             x = self.padding(x)
-        x = self.relu(self.conv_shared(x))
+        if self.conv_shared_bn is not None:
+            x = self.relu(self.conv_shared_bn(self.conv_shared(x)))
+        else:
+            x = self.relu(self.conv_shared(x))
 
         # Anchor Score. [batch, anchors per location * 1/2, height, width].
         rpn_class_logits = self.conv_class(x)
