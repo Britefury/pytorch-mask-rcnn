@@ -42,7 +42,7 @@ def mrcnn_transformed_image_padding(image_size, xf, net_block_size):
     pad_offset_xy = np.array([img_padding[1][0], img_padding[0][0]])
     padded_centre_xy = pad_offset_xy + image_centre_xy
 
-    # Combine transformation with translations that apply centreing and padding
+    # Combine transformation with translations that apply centre-ing and padding
     centre_to_origin = affine_transforms.translation_matrices(-image_centre_xy[None, :])
     origin_to_pad_centre = affine_transforms.translation_matrices(padded_centre_xy[None, :])
     final_xf = affine_transforms.cat_nx2x3(origin_to_pad_centre, xf, centre_to_origin)
@@ -57,7 +57,35 @@ def mrcnn_transformed_image_padding(image_size, xf, net_block_size):
     return window, final_xf, block_padded_shape
 
 
-def mrcnn_augmented_detections(net, x, xf, net_block_size):
+def mrcnn_augmentation_transform_and_shape(image_size, xf, net_block_size):
+    """
+    Generate a PyTorch compatible transform, inverse transform and padded image shape for performing inference
+    on an image of size `image_size` that has been transformed by the augmentation transformation `xf`, which
+    must be rounded up to a size that is a multiple of `net_block_size`
+
+    :param image_size: an image size as a tuple; (height, width)
+    :param xf: An affine transformation matrix used for augmentation, (1, 2, 3) aray
+    :param net_block_size: the network block size; image will be rounded up to this before passing to
+        network for inference
+    :return: `(window, xf_padded, inv_xf_padded, xf_torch, padded_shape)`
+        window: `(1, 4)` array giving the valid window size to be passed to Mask-RCNN
+        xf_padded: augmentation transformation with padding; useful if you want to invert the augmentation present
+        inv_xf_padded: the inverse of `xf_padded`; returned in case its useful
+        xf_torch: PyTorch grid sample compatible transformation
+        padded_shape: the (height, width) shape of the image with padding
+    """
+    # Get window, padded transformation and padded shape
+    window, xf_padded, padded_shape = mrcnn_transformed_image_padding(image_size, xf, net_block_size)
+    inv_xf_padded = affine_transforms.inv_nx2x3(xf_padded)
+
+    # Apply scaling factors so that xf operates on [-1, 1] Torch grid
+    grid_to_tgt_px, src_px_to_grid = affine_transforms.grid_to_px_nx2x3(1, image_size, padded_shape)
+    xf_torch = affine_transforms.cat_nx2x3(src_px_to_grid, inv_xf_padded, grid_to_tgt_px)
+
+    return window, xf_padded, inv_xf_padded, xf_torch, padded_shape
+
+
+def mrcnn_augmented_detections(net, x, xf, net_block_size, torch_device):
     """
     Generate augmented detections with a Mask-RCNN network
 
@@ -66,6 +94,7 @@ def mrcnn_augmented_detections(net, x, xf, net_block_size):
     :param xf: An affine transformation matrix used for augmentation, (1, 2, 3) aray
     :param net_block_size: the network block size; image will be rounded up to this before passing to
         network for inference
+    :param torch_device: device to load tensors onto
     :return: `(detections, misc_detect, xf_padded, inv_xf_padded, padded_shape)`
         detections: detections returned by `net.detect_forward_np`
         misc_detect: misc detection data returned by `net.detect_forward`
@@ -76,26 +105,22 @@ def mrcnn_augmented_detections(net, x, xf, net_block_size):
     """
     x_4 = x.transpose(2, 0, 1)[None, ...].astype(np.float32)
 
-    # Get window, padded transformation and padded shape
-    window, xf_padded, padded_shape = mrcnn_transformed_image_padding(x.shape[:2], xf, net_block_size)
-    inv_xf_padded = affine_transforms.inv_nx2x3(xf_padded)
+    window, xf_padded, inv_xf_padded, xf_torch, padded_shape = mrcnn_augmentation_transform_and_shape(
+        x.shape[:2], xf, net_block_size)
 
-    # Apply scaling factors so that xf operates on [-1, 1] Torch grid
-    grid_to_tgt_px, src_px_to_grid = affine_transforms.grid_to_px_nx2x3(1, x.shape[:2], padded_shape)
-    final_xf_padded_torch = affine_transforms.cat_nx2x3(src_px_to_grid, inv_xf_padded, grid_to_tgt_px)
+    with torch.no_grad():
+        # Variables for image and transformation
+        x_t = torch.tensor(x_4, dtype=torch.float, device=torch_device)
+        xf_t = torch.tensor(xf_torch, dtype=torch.float, device=torch_device)
 
-    # Variables for image and transformation
-    X_var = torch.autograd.Variable(torch.from_numpy(x_4).float().cuda(), volatile=True)
-    xf_padded_var = torch.autograd.Variable(torch.from_numpy(final_xf_padded_torch).float().cuda(), volatile=True)
+        # Affine grid for applying augmentation
+        grid_x_padded = F.affine_grid(xf_t, torch.Size((1, 1, padded_shape[0], padded_shape[1])))
 
-    # Affine grid for applying augmentation
-    grid_X_padded = F.affine_grid(xf_padded_var, torch.Size((1, 1, padded_shape[0], padded_shape[1])))
+        # Apply augmentation
+        x_aug = F.grid_sample(x_t, grid_x_padded)
 
-    # Apply augmentation
-    X_aug = F.grid_sample(X_var, grid_X_padded)
-
-    # Detect
-    detections = net.detect_forward_np(X_aug, window)
+        # Detect
+        detections = net.detect_forward_np(x_aug, window)
 
     return detections, xf_padded, inv_xf_padded, padded_shape
 
@@ -117,6 +142,7 @@ def deaugment_mrcnn_detections(detections, inv_xf_padded):
     det_boxes_aug = detections[0].boxes
     det_class_ids = detections[0].class_ids
     det_scores = detections[0].scores
+    mask_boxes_aug = detections[0].mask_boxes
     mrcnn_mask_aug = detections[0].masks
 
     # Get corners of detection boxes
@@ -133,6 +159,24 @@ def deaugment_mrcnn_detections(detections, inv_xf_padded):
     # Compute detection boxes in image space
     det_boxes_int = np.concatenate([np.floor(det_corners_xy[:, :, ::-1].min(axis=1)),
                                     np.ceil(det_corners_xy[:, :, ::-1].max(axis=1))], axis=1).astype(int)
+
+    # Mask boxes
+    # Get corners of detection boxes
+    mask_aug_xy_00 = np.stack([mask_boxes_aug[0, :, None, 1], mask_boxes_aug[0, :, None, 0]], axis=2)
+    mask_aug_xy_01 = np.stack([mask_boxes_aug[0, :, None, 3], mask_boxes_aug[0, :, None, 0]], axis=2)
+    mask_aug_xy_10 = np.stack([mask_boxes_aug[0, :, None, 1], mask_boxes_aug[0, :, None, 2]], axis=2)
+    mask_aug_xy_11 = np.stack([mask_boxes_aug[0, :, None, 3], mask_boxes_aug[0, :, None, 2]], axis=2)
+    mask_corners_aug_xy = np.concatenate([mask_aug_xy_00, mask_aug_xy_01, mask_aug_xy_10, mask_aug_xy_11], axis=1)
+    mask_corners_aug_flat_xy = mask_corners_aug_xy.reshape((-1, 2))
+    # Transform detection boxes from augmented space to image space
+    mask_corners_flat_xy = affine_transforms.transform_points(inv_xf_padded[0], mask_corners_aug_flat_xy)
+    mask_corners_xy = mask_corners_flat_xy.reshape(mask_corners_aug_xy.shape)
+
+    # Compute detection boxes in image space
+    mask_boxes_int = np.concatenate([np.floor(mask_corners_xy[:, :, ::-1].min(axis=1)),
+                                    np.ceil(mask_corners_xy[:, :, ::-1].max(axis=1))], axis=1).astype(int)
+
+
     # Top left corner of each box, rounded
     det_boxes_topleft_xy = np.floor(det_corners_xy.min(axis=1))
 
@@ -163,11 +207,10 @@ def deaugment_mrcnn_detections(detections, inv_xf_padded):
         mrcnn_mask.append(img_mask)
 
     return MaskRCNNDetections(boxes=det_boxes_int, class_ids=det_class_ids[0], scores=det_scores[0],
-                              masks=mrcnn_mask)
+                              mask_boxes=mask_boxes_int, masks=mrcnn_mask)
 
 
-def mrcnn_augmented_detections_to_label_image(image_size, det_scores, det_class_id, det_boxes, mrcnn_mask,
-                                              mask_nms_thresh=0.9):
+def mrcnn_augmented_detections_to_label_image(image_size, detections, mask_nms_thresh=0.9):
     """
     Generate a label image from augmented Mask-RCNN detections
     Use this rather than `mrcnn_detections_to_label_image` if the detections were augmented using
@@ -184,6 +227,11 @@ def mrcnn_augmented_detections_to_label_image(image_size, det_scores, det_class_
         label_img; (height, width) label image with different integer ID for each instance
         cls_img; (height, width) with pixels labelled by class
     """
+    det_scores = detections.scores
+    det_boxes = detections.boxes
+    det_class_id = detections.class_ids
+    det_mask_boxes = detections.mask_boxes
+    mrcnn_mask = detections.masks
     if det_scores.ndim == 2:
         # Remove batch dimension
         det_boxes = det_boxes[0]
@@ -198,7 +246,7 @@ def mrcnn_augmented_detections_to_label_image(image_size, det_scores, det_class_
 
     label_i = 1
     for i in order:
-        box = det_boxes[i]
+        box = det_mask_boxes[i]
         y1, x1, y2, x2 = box
         y1 = int(y1)
         x1 = int(x1)
@@ -234,17 +282,20 @@ def mask_intersection(box_a, box_b, mask_a, mask_b):
     return box_inter, mask_a_in_i, mask_b_in_i
 
 
+def box_union(box_a, box_b):
+    return np.append(np.minimum(box_a[:2], box_b[:2]), np.maximum(box_a[2:], box_b[2:]), axis=0)
+
 def mask_union(box_a, box_b, mask_a, mask_b):
-    box_union = np.append(np.minimum(box_a[:2], box_b[:2]), np.maximum(box_a[2:], box_b[2:]), axis=0)
-    box_u_sz = tuple(box_union[2:] - box_union[:2])
-    box_a_in_u = box_a - np.tile(box_union[:2], [2])
-    box_b_in_u = box_b - np.tile(box_union[:2], [2])
+    box_u = box_union(box_a, box_b)
+    box_u_sz = tuple(box_u[2:] - box_u[:2])
+    box_a_in_u = box_a - np.tile(box_u[:2], [2])
+    box_b_in_u = box_b - np.tile(box_u[:2], [2])
     mask_a_in_u = np.zeros(box_u_sz, dtype=mask_a.dtype)
     mask_b_in_u = np.zeros(box_u_sz, dtype=mask_b.dtype)
     mask_a_in_u[box_a_in_u[0]:box_a_in_u[2], box_a_in_u[1]:box_a_in_u[3]] = mask_a
     mask_b_in_u[box_b_in_u[0]:box_b_in_u[2], box_b_in_u[1]:box_b_in_u[3]] = mask_b
 
-    return box_union, mask_a_in_u, mask_b_in_u
+    return box_u, mask_a_in_u, mask_b_in_u
 
 
 def mask_agreement(mask_a, mask_b):
@@ -264,16 +315,17 @@ def mask_bin_iou(mask_a, mask_b):
     return (mask_a & mask_b).sum() / ((mask_a | mask_b).sum() + 1.0e-12)
 
 
-def greedily_merge_augmented_detections(aug_dets, detection_proportion_thresh=0.25, box_overlap_thresh=0.25,
-                                        similarity_thresh=None, similarity_function='agreement', progress_iter_func=None):
+def greedily_merge_detections(dets, detection_proportion_thresh=0.25, box_overlap_thresh=0.25,
+                              similarity_thresh=None, similarity_function='agreement', progress_iter_func=None):
     """
-    Greedily merge augmented detections. The detections will be merged and combined to form a hopefully improved set
+    Greedily merge detections. The detections will be merged and combined to form a hopefully improved set
     of detections.
 
-    Gather outputs from the `deaugment_mrcnn_detections` function and put in a list to pass as the `aug_dets`
+    Usage:
+    Gather outputs from the `deaugment_mrcnn_detections` function and put in a list to pass as the `dets`
     parameter.
 
-    :param aug_dets: Augmented detections.
+    :param dets: Detections as a list of `MaskRCNNDetections` instances
     :param detection_proportion_thresh: The proportion of images in which a detection must occur for it to pass.
         This way, if an object is detected in too few of the images, then it will be rejected
     :param box_overlap_thresh: Detection box IoU must be at least this value for the merger to consider merging
@@ -311,26 +363,29 @@ def greedily_merge_augmented_detections(aug_dets, detection_proportion_thresh=0.
     if similarity_thresh is None:
         similarity_thresh = default_similarity_thresh
 
-    det_boxes, det_class_ids, det_scores, mrcnn_masks = aug_dets[0]
+    det_boxes = dets[0].boxes
+    det_class_ids = dets[0].class_ids
+    det_scores = dets[0].scores
+    mask_boxes = dets[0].mask_boxes
+    mrcnn_masks = dets[0].masks
     det_count = np.ones(det_class_ids.shape, dtype=float)
 
-    for aug_i in progress_iter_func(range(1, len(aug_dets))):
-        det_boxes_i, det_class_ids_i, det_scores_i, mrcnn_masks_i = aug_dets[aug_i]
-        b_unused = np.ones(det_class_ids_i.shape, dtype=bool)
+    for aug_i in progress_iter_func(range(1, len(dets))):
+        dets_i = dets[aug_i]
+        b_unused = np.ones(dets_i.class_ids.shape, dtype=bool)
 
-        if len(det_boxes) > 0 and len(det_boxes_i) > 0:
-            box_overlaps = compute_overlaps(det_boxes, det_boxes_i)
+        if len(det_boxes) > 0 and len(dets_i.boxes) > 0:
+            box_overlaps = compute_overlaps(det_boxes, dets_i.boxes)
             mask_similarity = -np.ones_like(box_overlaps)
 
 
             det_as, det_bs = np.where(box_overlaps >= box_overlap_thresh)
 
-            for det_a in det_as:
-                for det_b in det_bs:
-                    _, mask_a, mask_b = mask_union(
-                        det_boxes[det_a], det_boxes_i[det_b], mrcnn_masks[det_a], mrcnn_masks_i[det_b])
-                    similarity = similarity_fn(mask_a, mask_b)
-                    mask_similarity[det_a, det_b] = similarity
+            for det_a, det_b in zip(det_as, det_bs):
+                _, mask_a, mask_b = mask_union(
+                    det_boxes[det_a], dets_i.boxes[det_b], mrcnn_masks[det_a], dets_i.masks[det_b])
+                similarity = similarity_fn(mask_a, mask_b)
+                mask_similarity[det_a, det_b] = similarity
 
             while True:
                 det_a, det_b = np.unravel_index(np.argmax(mask_similarity.flatten()), mask_similarity.shape)
@@ -342,29 +397,33 @@ def greedily_merge_augmented_detections(aug_dets, detection_proportion_thresh=0.
                 mask_similarity[:, det_b] = -1
 
                 # Merge
-                box_u, mask_a_u, mask_b_u = mask_union(
-                    det_boxes[det_a], det_boxes_i[det_b], mrcnn_masks[det_a], mrcnn_masks_i[det_b])
-                det_boxes[det_a] = box_u
-                det_scores[det_a] = det_scores[det_a] + det_scores_i[det_b]
+                mask_box_u, mask_a_u, mask_b_u = mask_union(
+                    mask_boxes[det_a], dets_i.mask_boxes[det_b], mrcnn_masks[det_a], dets_i.masks[det_b])
+                det_boxes[det_a] = box_union(det_boxes[det_a], dets_i.boxes[det_b])
+                mask_boxes[det_a] = mask_box_u
+                det_scores[det_a] = det_scores[det_a] + dets_i.scores[det_b]
                 mrcnn_masks[det_a] = mask_a_u + mask_b_u
                 det_count[det_a] += 1
 
-        det_boxes = np.append(det_boxes, det_boxes_i[b_unused], axis=0)
-        det_class_ids = np.append(det_class_ids, det_class_ids_i[b_unused], axis=0)
-        det_scores = np.append(det_scores, det_scores_i[b_unused], axis=0)
-        mrcnn_masks.extend([mrcnn_masks_i[j] for j in np.where(b_unused)[0]])
+        det_boxes = np.append(det_boxes, dets_i.boxes[b_unused], axis=0)
+        det_class_ids = np.append(det_class_ids, dets_i.class_ids[b_unused], axis=0)
+        det_scores = np.append(det_scores, dets_i.scores[b_unused], axis=0)
+        mask_boxes = np.append(mask_boxes, dets_i.mask_boxes[b_unused], axis=0)
+        mrcnn_masks.extend([dets_i.masks[j] for j in np.where(b_unused)[0]])
         det_count = np.append(det_count, np.ones((int(b_unused.sum()),), dtype=float), axis=0)
 
     # Average over detections
     det_scores = det_scores / det_count
     mrcnn_masks = [mask / n_dets for mask, n_dets in zip(mrcnn_masks, det_count)]
 
-    n_dets_thresh = round(len(aug_dets) * detection_proportion_thresh)
+    n_dets_thresh = round(len(dets) * detection_proportion_thresh)
     pass_mask = det_count >= n_dets_thresh
 
     merged_boxes = det_boxes[pass_mask]
     merged_class_ids = det_class_ids[pass_mask]
     merged_scores = det_scores[pass_mask]
+    merged_mask_boxes = mask_boxes[pass_mask]
     merged_masks = [mask for mask, p in zip(mrcnn_masks, pass_mask) if p]
 
-    return merged_boxes, merged_class_ids, merged_scores, merged_masks
+    return MaskRCNNDetections(boxes=merged_boxes, class_ids=merged_class_ids, scores=merged_scores,
+                              mask_boxes=merged_mask_boxes, masks=merged_masks)
