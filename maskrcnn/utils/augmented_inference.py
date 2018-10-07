@@ -178,7 +178,7 @@ def deaugment_mrcnn_detections(detections, inv_xf_padded):
 
 
     # Top left corner of each box, rounded
-    det_boxes_topleft_xy = np.floor(det_corners_xy.min(axis=1))
+    mask_boxes_topleft_xy = np.floor(mask_corners_xy.min(axis=1))
 
     # We now need to transform the masks.
     # We need to compute the transformation applied to each mask. To do this, we compute the transformation
@@ -193,7 +193,7 @@ def deaugment_mrcnn_detections(detections, inv_xf_padded):
     ]])
 
     # Target triangles; de-augmented detection box corners, relative to top left of de-augmented box
-    tgt_tris_xy = det_corners_xy[:, :3, :] - np.floor(det_boxes_topleft_xy[:, None, :])
+    tgt_tris_xy = mask_corners_xy[:, :3, :] - np.floor(mask_boxes_topleft_xy[:, None, :])
 
     # Compute mask matrices
     mask_matrices = affine_transforms.triangle_to_triangle_matrices(src_tris_xy, tgt_tris_xy)
