@@ -383,7 +383,7 @@ def greedily_merge_detections(dets, detection_proportion_thresh=0.25, box_overla
 
             for det_a, det_b in zip(det_as, det_bs):
                 _, mask_a, mask_b = mask_union(
-                    det_boxes[det_a], dets_i.boxes[det_b], mrcnn_masks[det_a], dets_i.masks[det_b])
+                    mask_boxes[det_a], dets_i.mask_boxes[det_b], mrcnn_masks[det_a], dets_i.masks[det_b])
                 similarity = similarity_fn(mask_a, mask_b)
                 mask_similarity[det_a, det_b] = similarity
 
