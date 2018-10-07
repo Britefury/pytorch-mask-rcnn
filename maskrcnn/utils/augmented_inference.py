@@ -200,8 +200,8 @@ def deaugment_mrcnn_detections(detections, inv_xf_padded):
 
     # De-augment the detection masks
     mrcnn_mask = []
-    for det_i in range(len(det_boxes_int)):
-        y1, x1, y2, x2 = det_boxes_int[det_i]
+    for det_i in range(len(mask_boxes_int)):
+        y1, x1, y2, x2 = mask_boxes_int[det_i]
         mask_aug = mrcnn_mask_aug[0, det_i, :, :]
         img_mask = cv2.warpAffine(mask_aug, mask_matrices[det_i], (x2 - x1, y2 - y1))
         mrcnn_mask.append(img_mask)
