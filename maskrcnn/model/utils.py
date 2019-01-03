@@ -357,6 +357,79 @@ def compute_overlaps(boxes1, boxes2):
 
 
 
+# def compute_overlaps_torch(boxes1, boxes2):
+#     """Computes IoU overlaps between two sets of boxes.
+#
+#     :param boxes1: boxes as a [N, (y1, x1, y2, x2)] tensor
+#     :param boxes2: boxes as a [M, (y1, x1, y2, x2)] tensor
+#
+#     :return: IoU overlaps as a [N, M] tensor
+#     """
+#     # 1. Tile boxes2 and repeate boxes1. This allows us to compare
+#     # every boxes1 against every boxes2 without loops.
+#     device = boxes1.device
+#
+#     boxes1_repeat = boxes2.size()[0]
+#     boxes2_repeat = boxes1.size()[0]
+#     boxes1 = boxes1.repeat(1,boxes1_repeat).view(-1,4)
+#     boxes2 = boxes2.repeat(boxes2_repeat,1)
+#
+#     # 2. Compute intersections
+#     b1_y1, b1_x1, b1_y2, b1_x2 = boxes1.chunk(4, dim=1)
+#     b2_y1, b2_x1, b2_y2, b2_x2 = boxes2.chunk(4, dim=1)
+#     y1 = torch.max(b1_y1, b2_y1)[:, 0]
+#     x1 = torch.max(b1_x1, b2_x1)[:, 0]
+#     y2 = torch.min(b1_y2, b2_y2)[:, 0]
+#     x2 = torch.min(b1_x2, b2_x2)[:, 0]
+#     zeros = torch.zeros(y1.size()[0], device=device)
+#     intersection = torch.max(x2 - x1, zeros) * torch.max(y2 - y1, zeros)
+#
+#     # 3. Compute unions
+#     b1_area = (b1_y2 - b1_y1) * (b1_x2 - b1_x1)
+#     b2_area = (b2_y2 - b2_y1) * (b2_x2 - b2_x1)
+#     union = b1_area[:,0] + b2_area[:,0] - intersection
+#
+#     # 4. Compute IoU and reshape to [boxes1, boxes2]
+#     iou = intersection / union
+#     overlaps = iou.view(boxes2_repeat, boxes1_repeat)
+#
+#     return overlaps
+
+
+def compute_overlaps_torch(boxes1, boxes2):
+    """Computes IoU overlaps between two sets of boxes.
+
+    :param boxes1: boxes as a [N, (y1, x1, y2, x2)] tensor
+    :param boxes2: boxes as a [M, (y1, x1, y2, x2)] tensor
+
+    :return: IoU overlaps as a [N, M] tensor
+    """
+    # 1. Reshape boxes1 and boxes2 so that they can be broadcast along dimensions 1 and 0 respectively
+
+    # boxes1: [N, (y1, x1, y2, x2)] -> [N, 1, (y1, x1, y2, x2)]
+    boxes1_cross = boxes1[:, None, :]
+    # boxes2: [M, (y1, x1, y2, x2)] -> [1, M, (y1, x1, y2, x2)]
+    boxes2_cross = boxes2[None, :, :]
+
+    # 2. Compute intersections
+    inter_yx1 = torch.max(boxes1_cross[:, :, 0:2], boxes2_cross[:, :, 0:2])
+    inter_yx2 = torch.min(boxes1_cross[:, :, 2:4], boxes2_cross[:, :, 2:4])
+    inter_area = torch.clamp(inter_yx2[:, :, 1] - inter_yx1[:, :, 1], min=0.0) * \
+                 torch.clamp(inter_yx2[:, :, 0] - inter_yx1[:, :, 0], min=0.0)
+
+    # 3. Compute unions
+    b1_size = boxes1_cross[:, :, 2:4] - boxes1_cross[:, :, 0:2]
+    b2_size = boxes2_cross[:, :, 2:4] - boxes2_cross[:, :, 0:2]
+    b1_area = b1_size[:, :, 0] * b1_size[:, :, 1]
+    b2_area = b2_size[:, :, 0] * b2_size[:, :, 1]
+    union_area = b1_area + b2_area - inter_area
+
+    # 4. Compute IoU
+    iou = inter_area / union_area
+
+    return iou
+
+
 def box_refinement(box, gt_box):
     """Compute refinement needed to transform box to gt_box.
     box and gt_box are [N, (y1, x1, y2, x2)]

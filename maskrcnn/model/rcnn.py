@@ -10,7 +10,7 @@ from maskrcnn.roialign.roi_align.roi_align import RoIAlign
 from .detections import RPNDetections, RCNNDetections
 from .utils import not_empty, is_empty, log2, intersect1d, unique1d, box_refinement, split_detections
 from .utils import flatten_detections_with_sample_indices, flatten_detections
-from .utils import unflatten_detections, concatenate_detections, torch_tensor_to_int_list
+from .utils import unflatten_detections, compute_overlaps_torch, concatenate_detections, torch_tensor_to_int_list
 from .rpn import apply_box_deltas, compute_rpn_losses, compute_rpn_losses_per_sample
 from .rpn import RPNBaseModel, alt_forward_method
 
@@ -527,44 +527,6 @@ def compute_faster_rcnn_losses(config, rpn_pred_class_logits, rpn_pred_bbox, rpn
 #  Detection target generation
 ############################################################
 
-def bbox_overlaps(boxes1, boxes2):
-    """Computes IoU overlaps between two sets of boxes.
-
-    :param boxes1: boxes as a [N, (y1, x1, y2, x2)] tensor
-    :param boxes2: boxes as a [M, (y1, x1, y2, x2)] tensor
-
-    :return: IoU overlaps as a [N, M] tensor
-    """
-    # 1. Tile boxes2 and repeate boxes1. This allows us to compare
-    # every boxes1 against every boxes2 without loops.
-    device = boxes1.device
-
-    boxes1_repeat = boxes2.size()[0]
-    boxes2_repeat = boxes1.size()[0]
-    boxes1 = boxes1.repeat(1,boxes1_repeat).view(-1,4)
-    boxes2 = boxes2.repeat(boxes2_repeat,1)
-
-    # 2. Compute intersections
-    b1_y1, b1_x1, b1_y2, b1_x2 = boxes1.chunk(4, dim=1)
-    b2_y1, b2_x1, b2_y2, b2_x2 = boxes2.chunk(4, dim=1)
-    y1 = torch.max(b1_y1, b2_y1)[:, 0]
-    x1 = torch.max(b1_x1, b2_x1)[:, 0]
-    y2 = torch.min(b1_y2, b2_y2)[:, 0]
-    x2 = torch.min(b1_x2, b2_x2)[:, 0]
-    zeros = torch.zeros(y1.size()[0], device=device)
-    intersection = torch.max(x2 - x1, zeros) * torch.max(y2 - y1, zeros)
-
-    # 3. Compute unions
-    b1_area = (b1_y2 - b1_y1) * (b1_x2 - b1_x1)
-    b2_area = (b2_y2 - b2_y1) * (b2_x2 - b2_x1)
-    union = b1_area[:,0] + b2_area[:,0] - intersection
-
-    # 4. Compute IoU and reshape to [boxes1, boxes2]
-    iou = intersection / union
-    overlaps = iou.view(boxes2_repeat, boxes1_repeat)
-
-    return overlaps
-
 
 
 def rcnn_detection_target_one_sample(config, proposals_nrm, prop_class_logits, prop_class, prop_bbox_deltas, gt_class_ids,
@@ -631,14 +593,14 @@ def rcnn_detection_target_one_sample(config, proposals_nrm, prop_class_logits, p
         gt_boxes_nrm = gt_boxes_nrm[non_crowd_ix, :]
 
         # Compute overlaps with crowd boxes [anchors, crowds]
-        crowd_overlaps = bbox_overlaps(proposals_nrm, crowd_boxes)
+        crowd_overlaps = compute_overlaps_torch(proposals_nrm, crowd_boxes)
         crowd_iou_max = torch.max(crowd_overlaps, dim=1)[0]
         no_crowd_bool = crowd_iou_max < 0.001
     else:
         no_crowd_bool = torch.tensor([True] * proposals_nrm.size()[0], dtype=torch.uint8, device=device)
 
     # Compute overlaps matrix [proposals, gt_boxes]
-    overlaps = bbox_overlaps(proposals_nrm, gt_boxes_nrm)
+    overlaps = compute_overlaps_torch(proposals_nrm, gt_boxes_nrm)
 
     # Determine postive and negative ROIs
     roi_iou_max = torch.max(overlaps, dim=1)[0]

@@ -9,10 +9,10 @@ import torch.nn.functional as F
 from maskrcnn.roialign.crop_and_resize.crop_and_resize import CropAndResizeAligned
 from .detections import MaskRCNNDetections
 from .utils import not_empty, is_empty, box_refinement, SamePad2d, concatenate_detections, flatten_detections,\
-    unflatten_detections, split_detections, torch_tensor_to_int_list
+    unflatten_detections, compute_overlaps_torch, split_detections, torch_tensor_to_int_list
 from .rpn import compute_rpn_losses, compute_rpn_losses_per_sample, alt_forward_method
 from .rcnn import FasterRCNNBaseModel, pyramid_roi_align, compute_rcnn_bbox_loss,\
-    compute_rcnn_class_loss, bbox_overlaps
+    compute_rcnn_class_loss
 
 
 
@@ -360,14 +360,14 @@ def maskrcnn_detection_target_one_sample(config, image_size, proposals_nrm, prop
         gt_masks = gt_masks[non_crowd_ix.data, :]
 
         # Compute overlaps with crowd boxes [anchors, crowds]
-        crowd_overlaps = bbox_overlaps(proposals_nrm, crowd_boxes)
+        crowd_overlaps = compute_overlaps_torch(proposals_nrm, crowd_boxes)
         crowd_iou_max = torch.max(crowd_overlaps, dim=1)[0]
         no_crowd_bool = crowd_iou_max < 0.001
     else:
         no_crowd_bool = torch.tensor([True] * proposals_nrm.size()[0], dtype=torch.uint8, device=device)
 
     # Compute overlaps matrix [proposals, gt_boxes]
-    overlaps = bbox_overlaps(proposals_nrm, gt_boxes_nrm)
+    overlaps = compute_overlaps_torch(proposals_nrm, gt_boxes_nrm)
 
     # Determine postive and negative ROIs
     roi_iou_max = torch.max(overlaps, dim=1)[0]
