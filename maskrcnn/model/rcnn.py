@@ -59,9 +59,15 @@ class RCNNHead (nn.Module):
             self.fc2 = nn.Linear(1024, 1024)
         else:
             self.conv1 = nn.Conv2d(self.depth, 1024, kernel_size=self.pool_size, stride=1)
-            self.bn1 = nn.BatchNorm2d(1024, eps=config.BN_EPS, momentum=0.01)
+            if config.RCNN_BATCHNORM:
+                self.bn1 = nn.BatchNorm2d(1024, eps=config.BN_EPS, momentum=0.01)
+            else:
+                self.bn1 = None
             self.conv2 = nn.Conv2d(1024, 1024, kernel_size=1, stride=1)
-            self.bn2 = nn.BatchNorm2d(1024, eps=config.BN_EPS, momentum=0.01)
+            if config.RCNN_BATCHNORM:
+                self.bn2 = nn.BatchNorm2d(1024, eps=config.BN_EPS, momentum=0.01)
+            else:
+                self.bn2 = None
 
         self.relu = nn.ReLU(inplace=True)
 
@@ -82,10 +88,12 @@ class RCNNHead (nn.Module):
             x = self.relu(self.fc2(x))
         else:
             x = self.conv1(x)
-            x = self.bn1(x)
+            if self.bn1 is not None:
+                x = self.bn1(x)
             x = self.relu(x)
             x = self.conv2(x)
-            x = self.bn2(x)
+            if self.bn2 is not None:
+                x = self.bn2(x)
             x = self.relu(x)
 
         x = x.view(x.shape[0],-1)

@@ -145,6 +145,9 @@ class Config(object):
     # If True, use an 2-layer MLP for the RCNN body
     RCNN_MLP2 = False
 
+    # If True, use batch norm in RCNN
+    RCNN_BATCHNORM = True
+
     # Bounding box refinement standard deviation for RCNN
     # Uses same value as RPN
     RCNN_BBOX_USE_STD_DEV = True
