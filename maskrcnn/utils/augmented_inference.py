@@ -29,8 +29,8 @@ def mrcnn_transformed_image_padding(image_size, xf, net_block_size):
 
     # Compute the padding required to completely contain the transformed image
     xf_padding, xf_padded_size = affine_transforms.compute_transformed_image_padding(image_size, xf)
-    xf_padding = xf_padding[0]
-    xf_padded_size = xf_padded_size[0]
+    xf_padding = xf_padding.max(axis=0)
+    xf_padded_size = xf_padded_size.max(axis=0)
 
     # Compute padding require to fit neural network blocks
     block_padded_shape = image_padding.round_up_shape(xf_padded_size, net_block_size)

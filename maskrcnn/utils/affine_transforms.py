@@ -358,15 +358,13 @@ def compute_transformed_image_padding(image_size, xf):
             [pad_top, pad_bottom, pad_left, pad_right] and `padded_size` is an `(N, 2)` array where each
             row is [padded_height, padded_width]
     """
-    if len(xf) != 1:
-        raise NotImplementedError('Check that this works with batch size > 1')
     height, width = image_size
 
     xf_corners = centre_xf(xf, image_size)
 
     # (4, 2) array where each row is a corner; note co-ordinates used for transformations are [x,y] NOT [y,x]
     corners = np.array([[0.0, 0.0], [width, 0.0], [width, height], [0.0, height]])
-    corners_z = np.matmul(xf_corners[:, :, :2], corners.T).transpose(0, 2, 1) + xf_corners[:, :, 2][: None, :]
+    corners_z = np.matmul(xf_corners[:, :, :2], corners.T).transpose(0, 2, 1) + xf_corners[:, :, 2][:, None, :]
 
     left_top = np.floor(corners_z.min(axis=1)).astype(int)
     right_bottom = np.ceil(corners_z.max(axis=1)).astype(int)
