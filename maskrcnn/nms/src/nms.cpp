@@ -1,24 +1,25 @@
-#include <TH/TH.h>
-#include <math.h>
+#include <torch/extension.h>
+#include <vector>
+#include <tuple>
 
-int cpu_nms(THLongTensor * keep_out, THLongTensor * num_out, THFloatTensor * boxes, THLongTensor * order, THFloatTensor * areas, float nms_overlap_thresh) {
-    // boxes has to be sorted
-    THArgCheck(THLongTensor_isContiguous(keep_out), 0, "keep_out must be contiguous");
-    THArgCheck(THLongTensor_isContiguous(boxes), 2, "boxes must be contiguous");
-    THArgCheck(THLongTensor_isContiguous(order), 3, "order must be contiguous");
-    THArgCheck(THLongTensor_isContiguous(areas), 4, "areas must be contiguous");
+std::tuple<int, long> nms_cpu(at::Tensor keep_out, at::Tensor boxes, at::Tensor order, at::Tensor areas,
+                              float nms_overlap_thresh) {
+    AT_CHECK(keep_out.is_contiguous(), "keep_out must be contiguous");
+    AT_CHECK(boxes.is_contiguous(), "boxes must be contiguous");
+    AT_CHECK(order.is_contiguous(), "order must be contiguous");
+    AT_CHECK(areas.is_contiguous(), "areas must be contiguous");
+
     // Number of ROIs
-    long boxes_num = THFloatTensor_size(boxes, 0);
-    long boxes_dim = THFloatTensor_size(boxes, 1);
+    const auto boxes_num = boxes.size(0);
+    const auto boxes_dim = boxes.size(1);
 
-    int64_t * keep_out_flat = THLongTensor_data(keep_out);
-    float * boxes_flat = THFloatTensor_data(boxes);
-    int64_t * order_flat = THLongTensor_data(order);
-    float * areas_flat = THFloatTensor_data(areas);
+    auto *keep_out_flat = keep_out.data<int64_t>();
+    const auto *boxes_flat = keep_out.data<float>();
+    const auto *order_flat = keep_out.data<int64_t>();
+    const auto *areas_flat = keep_out.data<float>();
 
-    THByteTensor* suppressed = THByteTensor_newWithSize1d(boxes_num);
-    THByteTensor_fill(suppressed, 0);
-    unsigned char * suppressed_flat =  THByteTensor_data(suppressed);
+    std::vector<unsigned char> suppressed;
+    suppressed.resize(boxes_num);
 
     // nominal indices
     int i, j;
@@ -34,7 +35,7 @@ int cpu_nms(THLongTensor * keep_out, THLongTensor * num_out, THFloatTensor * box
     long num_to_keep = 0;
     for (_i=0; _i < boxes_num; ++_i) {
         i = order_flat[_i];
-        if (suppressed_flat[i] == 1) {
+        if (suppressed[i] == 1) {
             continue;
         }
         keep_out_flat[num_to_keep++] = i;
@@ -45,7 +46,7 @@ int cpu_nms(THLongTensor * keep_out, THLongTensor * num_out, THFloatTensor * box
         iarea = areas_flat[i];
         for (_j = _i + 1; _j < boxes_num; ++_j) {
             j = order_flat[_j];
-            if (suppressed_flat[j] == 1) {
+            if (suppressed[j] == 1) {
                 continue;
             }
             xx1 = fmaxf(ix1, boxes_flat[j * boxes_dim]);
@@ -57,13 +58,14 @@ int cpu_nms(THLongTensor * keep_out, THLongTensor * num_out, THFloatTensor * box
             inter = w * h;
             ovr = inter / (iarea + areas_flat[j] - inter);
             if (ovr > nms_overlap_thresh) {
-                suppressed_flat[j] = 1;
+                suppressed[j] = 1;
             }
         }
     }
 
-    int64_t *num_out_flat = THLongTensor_data(num_out);
-    *num_out_flat = num_to_keep;
-    THByteTensor_free(suppressed);
-    return 1;
+    return std::tuple<int, long>(1, num_to_keep);
+}
+
+PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+  m.def("nms_cpu", &nms_cpu, "NMS - CPU");
 }

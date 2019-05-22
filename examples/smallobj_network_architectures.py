@@ -167,7 +167,7 @@ class Decoder (nn.Module):
             _, _, H, W = x_dec.size()
             H *= 2
             W *= 2
-        x_us = F.upsample(x_dec, (H, W), mode='bilinear')
+        x_us = F.interpolate(x_dec, (H, W), mode='bilinear')
         if x_enc is not None:
             y = torch.cat([x_enc, x_us], 1)
         else:
@@ -493,9 +493,9 @@ class ResNetBackboneFPN(nn.Module):
     def forward(self, x):
         r16, r8, r4, r2 = self.resnet_main(x)
         p16_out = self.P4_conv1(r16)
-        p8_out = self.P3_conv1(r8) + F.upsample(p16_out, scale_factor=2)
-        p4_out = self.P2_conv1(r4) + F.upsample(p8_out, scale_factor=2)
-        p2_out = self.P1_conv1(r2) + F.upsample(p4_out, scale_factor=2)
+        p8_out = self.P3_conv1(r8) + F.interpolate(p16_out, scale_factor=2)
+        p4_out = self.P2_conv1(r4) + F.interpolate(p8_out, scale_factor=2)
+        p2_out = self.P1_conv1(r2) + F.interpolate(p4_out, scale_factor=2)
 
         p16_out = self.P4_conv2(p16_out)
         p8_out = self.P3_conv2(p8_out)

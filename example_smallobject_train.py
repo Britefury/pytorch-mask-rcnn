@@ -8,7 +8,7 @@ import maskrcnn.utils.inference
 
 @click.command()
 @click.option('--dataset', type=click.Choice(['s1_train_test', 's1_train_val', 'stage2', 'ellipses']),
-              default='s1_train_val')
+              default='ellipses')
 @click.option('--backbone', type=click.Choice(['unet5_wn', 'unet5_bn', 'resnet50']),
               default='resnet50', help='backbone architecture')
 @click.option('--head', type=click.Choice(['mask_rcnn', 'faster_rcnn', 'rpn']),

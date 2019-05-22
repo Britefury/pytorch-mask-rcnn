@@ -8,7 +8,7 @@ import torch.nn.functional as F
 
 from maskrcnn.roialign.crop_and_resize.crop_and_resize import CropAndResizeAligned
 from .detections import MaskRCNNDetections
-from .utils import not_empty, is_empty, box_refinement, SamePad2d, concatenate_detections, flatten_detections,\
+from .utils import box_refinement, SamePad2d, concatenate_detections, flatten_detections,\
     unflatten_detections, compute_overlaps_torch, split_detections, torch_tensor_to_int_list
 from .rpn import compute_rpn_losses, compute_rpn_losses_per_sample, alt_forward_method
 from .rcnn import FasterRCNNBaseModel, pyramid_roi_align, compute_rcnn_bbox_loss,\
@@ -160,7 +160,7 @@ def compute_mrcnn_mask_loss(target_masks, target_class_ids, pred_masks):
     """
     device = pred_masks.device
 
-    if not_empty(target_class_ids):
+    if len(target_class_ids) > 0:
         # Only positive ROIs contribute to the loss. And only
         # the class specific mask of each ROI.
         positive_ix = torch.nonzero(target_class_ids > 0)[:, 0]
@@ -174,7 +174,7 @@ def compute_mrcnn_mask_loss(target_masks, target_class_ids, pred_masks):
         # Binary cross entropy
         loss = F.binary_cross_entropy(y_pred, y_true)
     else:
-        loss = torch.tensor([0], dtype=torch.float, device=device)
+        loss = torch.tensor(0.0, dtype=torch.float, device=device)
 
     return loss
 
@@ -350,7 +350,7 @@ def maskrcnn_detection_target_one_sample(config, image_size, proposals_nrm, prop
     # Handle COCO crowds
     # A crowd box in COCO is a bounding box around several instances. Exclude
     # them from training. A crowd box is given a negative class ID.
-    if not_empty(torch.nonzero(gt_class_ids < 0)):
+    if len(torch.nonzero(gt_class_ids < 0)) > 0:
         crowd_ix = torch.nonzero(gt_class_ids < 0)[:, 0]
         non_crowd_ix = torch.nonzero(gt_class_ids > 0)[:, 0]
         crowd_boxes = gt_boxes_nrm[crowd_ix.data, :]
@@ -383,7 +383,7 @@ def maskrcnn_detection_target_one_sample(config, image_size, proposals_nrm, prop
 
     # Subsample ROIs. Aim for 33% positive
     # Positive ROIs
-    if not_empty(torch.nonzero(positive_roi_bool)):
+    if len(torch.nonzero(positive_roi_bool)) > 0:
         positive_indices = torch.nonzero(positive_roi_bool)[:, 0]
 
         positive_count = int(config.RCNN_TRAIN_ROIS_PER_IMAGE *
@@ -455,7 +455,7 @@ def maskrcnn_detection_target_one_sample(config, image_size, proposals_nrm, prop
     negative_roi_bool = roi_iou_max < 0.5
     negative_roi_bool = negative_roi_bool & no_crowd_bool
     # Negative ROIs. Add enough to maintain positive:negative ratio.
-    if not_empty(torch.nonzero(negative_roi_bool)) and positive_count>0:
+    if len(torch.nonzero(negative_roi_bool)) > 0 and positive_count>0:
         negative_indices = torch.nonzero(negative_roi_bool)[:, 0]
         r = 1.0 / config.RCNN_ROI_POSITIVE_RATIO
         negative_count = int(r * positive_count - positive_count)
@@ -494,14 +494,13 @@ def maskrcnn_detection_target_one_sample(config, image_size, proposals_nrm, prop
         else:
             roi_class_logits = roi_class_probs = roi_bbox_deltas = None
 
-        zeros = torch.zeros(negative_count, dtype=torch.long, device=device)
-        roi_gt_class_ids = torch.cat([roi_gt_class_ids, zeros], dim=0)
+        roi_gt_class_ids = torch.cat([roi_gt_class_ids,
+                                      torch.zeros(negative_count, dtype=torch.long, device=device)], dim=0)
 
-        zeros = torch.zeros((negative_count,4), device=device)
-        deltas = torch.cat([deltas, zeros], dim=0)
+        deltas = torch.cat([deltas, torch.zeros(negative_count, 4, device=device)], dim=0)
 
-        zeros = torch.zeros((negative_count,config.MASK_SHAPE[0],config.MASK_SHAPE[1]), device=device)
-        masks = torch.cat([masks, zeros], dim=0)
+        zero_mask = torch.zeros((negative_count, config.MASK_SHAPE[0], config.MASK_SHAPE[1]), device=device)
+        masks = torch.cat([masks, zero_mask], dim=0)
     elif positive_count > 0:
         rois = positive_rois
         roi_class_logits = positive_class_logits
@@ -515,18 +514,19 @@ def maskrcnn_detection_target_one_sample(config, image_size, proposals_nrm, prop
 
         roi_gt_class_ids = torch.zeros(negative_count, device=device, dtype=torch.long)
         deltas = torch.zeros((negative_count, 4), device=device)
-        masks = torch.zeros((negative_count,config.MASK_SHAPE[0],config.MASK_SHAPE[1]), device=device)
+        masks = torch.zeros((negative_count, config.MASK_SHAPE[0], config.MASK_SHAPE[1]), device=device)
     else:
-        rois = torch.zeros([0], dtype=torch.float, device=device)
+        n_classes = config.NUM_CLASSES
+        rois = torch.zeros(0, 4, dtype=torch.float, device=device)
         if has_rcnn_predictions:
-            roi_class_logits = torch.zeros([0], dtype=torch.float, device=device)
-            roi_class_probs = torch.zeros([0], dtype=torch.float, device=device)
-            roi_bbox_deltas = torch.zeros([0], dtype=torch.float, device=device)
+            roi_class_logits = torch.zeros(0, n_classes, dtype=torch.float, device=device)
+            roi_class_probs = torch.zeros(0, n_classes, dtype=torch.float, device=device)
+            roi_bbox_deltas = torch.zeros(0, n_classes, 4, dtype=torch.float, device=device)
         else:
             roi_class_logits = roi_class_probs = roi_bbox_deltas = None
-        roi_gt_class_ids = torch.zeros([0], dtype=torch.int, device=device)
-        deltas = torch.zeros([0], dtype=torch.float, device=device)
-        masks = torch.zeros([0], dtype=torch.float, device=device)
+        roi_gt_class_ids = torch.zeros(0, dtype=torch.int, device=device)
+        deltas = torch.zeros(0, n_classes, 4, dtype=torch.float, device=device)
+        masks = torch.zeros(0, config.MASK_SHAPE[0], config.MASK_SHAPE[1], dtype=torch.float, device=device)
 
     return rois, roi_class_logits, roi_class_probs, roi_bbox_deltas, roi_gt_class_ids, deltas, masks
 
@@ -603,6 +603,8 @@ def maskrcnn_detection_target_batch(config, image_size, proposals_nrm, prop_clas
     target_class_ids = []
     target_deltas = []
     target_mask = []
+    n_classes = config.NUM_CLASSES
+    device = proposals_nrm.device
     for sample_i, (n_props, n_gts) in enumerate(zip(n_proposals_per_sample, n_gts_per_sample)):
         sample_roi_class_logits = sample_roi_class_probs = sample_roi_bbox_deltas = None
         if n_props > 0 and n_gts > 0:
@@ -617,7 +619,7 @@ def maskrcnn_detection_target_batch(config, image_size, proposals_nrm, prop_clas
                             config, image_size, proposals_nrm[sample_i, :n_props], sample_prop_class_logits,
                             sample_prop_class, sample_prop_bbox_deltas, gt_class_ids[sample_i, :n_gts],
                             gt_boxes_nrm[sample_i, :n_gts], gt_masks[sample_i, :n_gts])
-            if not_empty(sample_rois):
+            if len(sample_rois) > 0:
                 sample_rois = sample_rois.unsqueeze(0)
                 if has_rcnn_predictions:
                     sample_roi_class_logits = sample_roi_class_logits.unsqueeze(0)
@@ -627,14 +629,14 @@ def maskrcnn_detection_target_batch(config, image_size, proposals_nrm, prop_clas
                 sample_deltas = sample_deltas.unsqueeze(0)
                 sample_masks = sample_masks.unsqueeze(0)
         else:
-            sample_rois = proposals_nrm.data.new()
+            sample_rois = torch.zeros(0, 4, dtype=torch.float, device=device)
             if has_rcnn_predictions:
-                sample_roi_class_logits = proposals_nrm.data.new()
-                sample_roi_class_probs = proposals_nrm.data.new()
-                sample_roi_bbox_deltas = proposals_nrm.data.new()
-            sample_roi_gt_class_ids = gt_class_ids.data.new()
-            sample_deltas = proposals_nrm.data.new()
-            sample_masks = gt_masks.data.new()
+                sample_roi_class_logits = torch.zeros(0, n_classes, dtype=torch.float, device=device)
+                sample_roi_class_probs = torch.zeros(0, n_classes, dtype=torch.float, device=device)
+                sample_roi_bbox_deltas = torch.zeros(0, n_classes, 4, dtype=torch.float, device=device)
+            sample_roi_gt_class_ids = torch.zeros(0, dtype=torch.int, device=device)
+            sample_deltas = torch.zeros(0, n_classes, 4, dtype=torch.float, device=device)
+            sample_masks = torch.zeros(0, config.MASK_SHAPE[0], config.MASK_SHAPE[1], dtype=torch.float, device=device)
         rois.append(sample_rois)
         if has_rcnn_predictions:
             roi_class_logits.append(sample_roi_class_logits)
@@ -760,8 +762,10 @@ class AbstractMaskRCNNModel (FasterRCNNBaseModel):
                                                 roi_bbox, n_rois_per_sample, gt_class_ids, gt_boxes_nrm, gt_masks,
                                                 n_gts_per_sample, hard_negative_mining)
 
-            if is_empty(rois):
-                mrcnn_mask = torch.zeros([0], dtype=torch.float, device=device)
+            if len(rois) == 0:
+                n_classes = self.config.NUM_CLASSES
+                mrcnn_mask = torch.zeros(len(images), 0, n_classes, self.config.MASK_SHAPE[0],
+                                         self.config.MASK_SHAPE[1], dtype=torch.float, device=device)
             else:
                 # Create masks for detections
                 # mrcnn_mask: [batch, detection, cls, mask_height, mask_width]
@@ -779,14 +783,15 @@ class AbstractMaskRCNNModel (FasterRCNNBaseModel):
 
 
             if max(n_targets_per_sample) == 0:
-                mrcnn_class_logits = torch.zeros([0], dtype=torch.float, device=device)
-                mrcnn_class = torch.zeros([0], dtype=torch.int, device=device)
-                mrcnn_bbox = torch.zeros([0], dtype=torch.float, device=device)
-                mrcnn_mask = torch.zeros([0], dtype=torch.float, device=device)
+                n_classes = self.config.NUM_CLASSES
+                mrcnn_class_logits = torch.zeros(len(images), 0, n_classes, dtype=torch.float, device=device)
+                mrcnn_bbox = torch.zeros(len(images), 0, n_classes, 4, dtype=torch.float, device=device)
+                mrcnn_mask = torch.zeros(len(images), 0, n_classes, self.config.MASK_SHAPE[0],
+                                         self.config.MASK_SHAPE[1], dtype=torch.float, device=device)
             else:
                 # Network Heads
                 # Proposal classifier and BBox regressor heads
-                mrcnn_class_logits, mrcnn_class, mrcnn_bbox = self.classifier(
+                mrcnn_class_logits, _, mrcnn_bbox = self.classifier(
                     mrcnn_feature_maps, rois, n_targets_per_sample, image_size)
 
                 # Create masks for detections
@@ -1026,7 +1031,7 @@ class AbstractMaskRCNNModel (FasterRCNNBaseModel):
         t_dets, n_dets_per_sample = self.detect_forward(images, image_windows, override_class=override_class)
 
 
-        if is_empty(t_dets.boxes) or is_empty(t_dets.class_ids) or is_empty(t_dets.scores):
+        if len(t_dets.boxes) == 0 or len(t_dets.class_ids) == 0 or len(t_dets.scores) == 0:
             # No detections
             n_images = images.shape[0]
             return [MaskRCNNDetections(boxes=np.zeros((1, 0, 4), dtype=np.float32),

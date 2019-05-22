@@ -48,14 +48,6 @@ def printProgressBar (iteration, total, prefix = '', suffix = '', decimals = 1, 
 #  Pytorch Utility Functions
 ############################################################
 
-_EMPTY_SIZES = {torch.Size([]), torch.Size([0])}
-
-def not_empty(tensor):
-    return tensor.size() not in _EMPTY_SIZES
-
-def is_empty(tensor):
-    return tensor.size() in _EMPTY_SIZES
-
 def unique1d(tensor):
     device = tensor.device
     if tensor.size()[0] == 0 or tensor.size()[0] == 1:
@@ -127,7 +119,7 @@ def concatenate_detection_tensors(dets):
         padded_dets = []
         for det, n_dets in zip(dets, n_dets_per_sample):
             if n_dets < max_dets:
-                z = example_det.new(1, max_dets - n_dets, *det_shape).zero_().to(det.device)
+                z = torch.zeros(1, max_dets - n_dets, *det.shape[2:], dtype=det.dtype, device=det.device)
                 if n_dets == 0:
                     padded_dets.append(z)
                 else:
@@ -194,12 +186,12 @@ def flatten_detections(n_dets_per_sample, *dets):
     for det in dets:
         flat = []
         for sample_i, n_dets in enumerate(n_dets_per_sample):
-            if det.size() and n_dets > 0:
+            if n_dets > 0:
                 flat.append(det[sample_i, :n_dets, ...])
         if len(flat) > 0:
             flat_dets.append(torch.cat(flat, dim=0))
         else:
-            empty = det.new(torch.Size()).zero_()
+            empty = torch.zeros(0, *det.shape[2:], dtype=det.dtype, device=det.device)
             flat_dets.append(empty)
 
     return tuple(flat_dets)
@@ -230,12 +222,12 @@ def flatten_detections_with_sample_indices(n_dets_per_sample, *dets):
     for det in dets:
         flat = []
         for sample_i, n_dets in enumerate(n_dets_per_sample):
-            if det.size() and n_dets > 0:
+            if n_dets > 0:
                 flat.append(det[sample_i, :n_dets, ...])
         if len(flat) > 0:
             flat_dets.append(torch.cat(flat, dim=0))
         else:
-            empty = det.new(torch.Size()).zero_()
+            empty = torch.zeros(0, *det.shape[2:], dtype=det.dtype, device=det.device)
             flat_dets.append(empty)
 
     return tuple(flat_dets) + (sample_indices,)

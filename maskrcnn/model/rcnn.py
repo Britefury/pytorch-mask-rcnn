@@ -4,11 +4,11 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from maskrcnn.nms.nms_wrapper import nms
+from maskrcnn.nms import nms
 from maskrcnn.roialign.crop_and_resize.crop_and_resize import CropAndResizeAligned, CropAndResize
 from maskrcnn.roialign.roi_align.roi_align import RoIAlign
 from .detections import RPNDetections, RCNNDetections
-from .utils import not_empty, is_empty, log2, intersect1d, unique1d, box_refinement, split_detections
+from .utils import log2, intersect1d, unique1d, box_refinement, split_detections
 from .utils import flatten_detections_with_sample_indices, flatten_detections
 from .utils import unflatten_detections, compute_overlaps_torch, concatenate_detections, torch_tensor_to_int_list
 from .rpn import apply_box_deltas, compute_rpn_losses, compute_rpn_losses_per_sample
@@ -412,9 +412,9 @@ def refine_detections_batch(config, rois_nrm, pred_class_probs, pred_box_deltas,
                                                                                       image_size, min_confidence,
                                                                                       override_class=override_class)
         if sample_det_boxes is None:
-            sample_det_boxes = torch.zeros([0], dtype=torch.float, device=device)
-            sample_det_class_ids = torch.zeros([0], dtype=torch.long, device=device)
-            sample_det_scores = torch.zeros([0], dtype=torch.float, device=device)
+            sample_det_boxes = torch.zeros(1, 0, 4, dtype=torch.float, device=device)
+            sample_det_class_ids = torch.zeros(1, 0, dtype=torch.long, device=device)
+            sample_det_scores = torch.zeros(1, 0, dtype=torch.float, device=device)
         else:
             n_detections_total += sample_det_boxes.size()[0]
             sample_det_boxes = sample_det_boxes.unsqueeze(0)
@@ -428,9 +428,9 @@ def refine_detections_batch(config, rois_nrm, pred_class_probs, pred_box_deltas,
         (det_boxes, det_class_ids, det_scores), n_dets_per_sample = concatenate_detections(
             det_boxes, det_class_ids, det_scores)
     else:
-        det_boxes = torch.zeros([0], dtype=torch.float, device=device)
-        det_class_ids = torch.zeros([0], dtype=torch.long, device=device)
-        det_scores = torch.zeros([0], dtype=torch.float, device=device)
+        det_boxes = torch.zeros(len(n_rois_per_sample), 0, 4, dtype=torch.float, device=device)
+        det_class_ids = torch.zeros(len(n_rois_per_sample), 0, dtype=torch.long, device=device)
+        det_scores = torch.zeros(len(n_rois_per_sample), 0, dtype=torch.float, device=device)
         n_dets_per_sample = [0] * len(n_rois_per_sample)
 
     return det_boxes, det_class_ids, det_scores, n_dets_per_sample
@@ -449,7 +449,7 @@ def compute_rcnn_class_loss(target_class_ids, pred_class_logits):
     """
 
     # Loss
-    if not_empty(target_class_ids):
+    if len(target_class_ids) > 0:
         loss = F.cross_entropy(pred_class_logits,target_class_ids.long())
     else:
         device = pred_class_logits.device
@@ -468,11 +468,11 @@ def compute_rcnn_bbox_loss(target_bbox_deltas, target_class_ids, pred_bbox_delta
     """
     device = pred_bbox_deltas.device
 
-    if not_empty(target_class_ids):
+    if len(target_class_ids) > 0:
         # Only positive ROIs contribute to the loss. And only
         # the right class_id of each ROI. Get their indicies.
         positive_roi_ix = torch.nonzero(target_class_ids > 0)
-        if positive_roi_ix.shape[0] > 0:
+        if len(positive_roi_ix) > 0:
             positive_roi_ix = positive_roi_ix[:, 0]
             positive_roi_class_ids = target_class_ids[positive_roi_ix].long()
             indices = torch.stack((positive_roi_ix,positive_roi_class_ids), dim=1)
@@ -593,7 +593,7 @@ def rcnn_detection_target_one_sample(config, proposals_nrm, prop_class_logits, p
     # Handle COCO crowds
     # A crowd box in COCO is a bounding box around several instances. Exclude
     # them from training. A crowd box is given a negative class ID.
-    if not_empty(torch.nonzero(gt_class_ids < 0)):
+    if len(torch.nonzero(gt_class_ids < 0)) > 0:
         crowd_ix = torch.nonzero(gt_class_ids < 0)[:, 0]
         non_crowd_ix = torch.nonzero(gt_class_ids > 0)[:, 0]
         crowd_boxes = gt_boxes_nrm[crowd_ix, :]
@@ -624,7 +624,7 @@ def rcnn_detection_target_one_sample(config, proposals_nrm, prop_class_logits, p
 
     # Subsample ROIs. Aim for 33% positive
     # Positive ROIs
-    if not_empty(torch.nonzero(positive_roi_bool)):
+    if len(torch.nonzero(positive_roi_bool)) > 0:
         positive_indices = torch.nonzero(positive_roi_bool)[:, 0]
 
         positive_count = int(config.RCNN_TRAIN_ROIS_PER_IMAGE *
@@ -669,7 +669,7 @@ def rcnn_detection_target_one_sample(config, proposals_nrm, prop_class_logits, p
     negative_roi_bool = roi_iou_max < 0.5
     negative_roi_bool = negative_roi_bool & no_crowd_bool
     # Negative ROIs. Add enough to maintain positive:negative ratio.
-    if not_empty(torch.nonzero(negative_roi_bool)) and positive_count>0:
+    if len(torch.nonzero(negative_roi_bool)) > 0 and positive_count>0:
         negative_indices = torch.nonzero(negative_roi_bool)[:, 0]
         r = 1.0 / config.RCNN_ROI_POSITIVE_RATIO
         negative_count = int(r * positive_count - positive_count)
@@ -725,16 +725,16 @@ def rcnn_detection_target_one_sample(config, proposals_nrm, prop_class_logits, p
         roi_gt_class_ids = torch.zeros(negative_count, dtype=torch.long, device=device)
         deltas = torch.zeros((negative_count,4), device=device)
     else:
-        rois = torch.zeros([0], dtype=torch.float, device=device)
+        n_classes = config.NUM_CLASSES
+        rois = torch.zeros(0, 4, dtype=torch.float, device=device)
         if has_rcnn_predictions:
-            roi_class_logits = torch.zeros([0], dtype=torch.float, device=device)
-            roi_class_probs = torch.zeros([0], dtype=torch.float, device=device)
-            roi_bbox_deltas = torch.zeros([0], dtype=torch.float, device=device)
+            roi_class_logits = torch.zeros(0, n_classes, dtype=torch.float, device=device)
+            roi_class_probs = torch.zeros(0, n_classes, dtype=torch.float, device=device)
+            roi_bbox_deltas = torch.zeros(0, n_classes, 4, dtype=torch.float, device=device)
         else:
             roi_class_logits = roi_class_probs = roi_bbox_deltas = None
-
-        roi_gt_class_ids = torch.zeros([0], dtype=torch.int, device=device)
-        deltas = torch.zeros([0], dtype=torch.float, device=device)
+        roi_gt_class_ids = torch.zeros(0, dtype=torch.int, device=device)
+        deltas = torch.zeros(0, n_classes, 4, dtype=torch.float, device=device)
 
     return rois, roi_class_logits, roi_class_probs, roi_bbox_deltas, roi_gt_class_ids, deltas
 
@@ -806,6 +806,8 @@ def rcnn_detection_target_batch(config, proposals_nrm, prop_class_logits, prop_c
         roi_class_logits = roi_class_probs = roi_bbox_deltas = None
     target_class_ids = []
     target_deltas = []
+    n_classes = config.NUM_CLASSES
+    device = proposals_nrm.device
     for sample_i, (n_props, n_gts) in enumerate(zip(n_proposals_per_sample, n_gts_per_sample)):
         sample_roi_class_logits = sample_roi_class_probs = sample_roi_bbox_deltas = None
         if n_props > 0 and n_gts > 0:
@@ -827,7 +829,7 @@ def rcnn_detection_target_batch(config, proposals_nrm, prop_class_logits, prop_c
                                                                                               gt_boxes_nrm[sample_i,
                                                                                               :n_gts],
                                                                                               hard_negative_mining)
-            if not_empty(sample_rois):
+            if len(sample_rois) > 0:
                 sample_rois = sample_rois.unsqueeze(0)
                 if has_rcnn_predictions:
                     sample_roi_class_logits = sample_roi_class_logits.unsqueeze(0)
@@ -836,13 +838,13 @@ def rcnn_detection_target_batch(config, proposals_nrm, prop_class_logits, prop_c
                 sample_roi_gt_class_ids = sample_roi_gt_class_ids.unsqueeze(0)
                 sample_deltas = sample_deltas.unsqueeze(0)
         else:
-            sample_rois = proposals_nrm.new()
+            sample_rois = torch.zeros(0, 4, dtype=torch.float, device=device)
             if has_rcnn_predictions:
-                sample_roi_class_logits = proposals_nrm.new()
-                sample_roi_class_probs = proposals_nrm.new()
-                sample_roi_bbox_deltas = proposals_nrm.new()
-            sample_roi_gt_class_ids = gt_class_ids.new()
-            sample_deltas = proposals_nrm.new()
+                sample_roi_class_logits = torch.zeros(0, n_classes, dtype=torch.float, device=device)
+                sample_roi_class_probs = torch.zeros(0, n_classes, dtype=torch.float, device=device)
+                sample_roi_bbox_deltas = torch.zeros(0, n_classes, 4, dtype=torch.float, device=device)
+            sample_roi_gt_class_ids = torch.zeros(0, dtype=torch.int, device=device)
+            sample_deltas = torch.zeros(0, n_classes, 4, dtype=torch.float, device=device)
         rois.append(sample_rois)
         if has_rcnn_predictions:
             roi_class_logits.append(sample_roi_class_logits)
@@ -1011,7 +1013,7 @@ class AbstractFasterRCNNModel (FasterRCNNBaseModel):
             # Subsamples proposals and generates target outputs for training
             # Note that proposal class IDs, gt_boxes, and gt_masks are zero
             # padded. Equally, returned rois and targets are zero padded.
-            rois, rcnn_class_logits, rcnn_class, rcnn_bbox, target_class_ids, target_deltas, n_targets_per_sample = \
+            rois, rcnn_class_logits, _, rcnn_bbox, target_class_ids, target_deltas, n_targets_per_sample = \
                 rcnn_detection_target_batch(self.config, rpn_rois, roi_class_logits, roi_class, roi_bbox,
                                             n_rois_per_sample, gt_class_ids, gt_boxes_nrm, n_gts_per_sample,
                                             hard_negative_mining)
@@ -1027,12 +1029,13 @@ class AbstractFasterRCNNModel (FasterRCNNBaseModel):
             if max(n_targets_per_sample) > 0:
                 # Network Heads
                 # Proposal classifier and BBox regressor heads
-                rcnn_class_logits, rcnn_class, rcnn_bbox = self.classifier(
+                rcnn_class_logits, _, rcnn_bbox = self.classifier(
                     rcnn_feature_maps, rois, n_targets_per_sample, image_size)
             else:
-                rcnn_class_logits = torch.zeros([0], dtype=torch.float, device=device)
-                rcnn_class = torch.zeros([0], dtype=torch.int, device=device)
-                rcnn_bbox = torch.zeros([0], dtype=torch.float, device=device)
+                n_samples = len(images)
+                n_classes = self.config.NUM_CLASSES
+                rcnn_class_logits = torch.zeros(n_samples, 0, n_classes, dtype=torch.float, device=device)
+                rcnn_bbox = torch.zeros(n_samples, 0, n_classes * 4, dtype=torch.float, device=device)
 
         return (rpn_class_logits, rpn_bbox, target_class_ids, rcnn_class_logits,
                 target_deltas, rcnn_bbox, n_targets_per_sample)
@@ -1194,21 +1197,6 @@ class AbstractFasterRCNNModel (FasterRCNNBaseModel):
             t_rcnn_dets, n_dets_per_sample = self.detect_forward(
                 images, image_windows, override_class=override_class, return_rpn_rois=return_rpn_rois)
             t_rpn_dets = n_rois_per_sample = None
-
-        if is_empty(t_rcnn_dets.boxes) or is_empty(t_rcnn_dets.class_ids) or is_empty(t_rcnn_dets.scores):
-            # No detections
-            n_images = images.shape[0]
-            empty_dets = [RCNNDetections(boxes=np.zeros((1, 0, 4), dtype=np.float32),
-                                         class_ids=np.zeros((1, 0), dtype=int),
-                                         scores=np.zeros((1, 0), dtype=np.float32))
-                          for i in range(n_images)]
-            if return_rpn_rois:
-                empty_rpn_outs = [RPNDetections(boxes=np.zeros((1, 0, 4), dtype=np.float32),
-                                                scores=np.zeros((1, 0), dtype=np.float32))
-                                  for i in range(n_images)]
-                return empty_dets, empty_rpn_outs
-            else:
-                return empty_dets
 
         # Convert to numpy
         det_boxes_np = t_rcnn_dets.boxes.cpu().numpy()

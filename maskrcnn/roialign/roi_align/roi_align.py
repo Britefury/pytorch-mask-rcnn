@@ -4,7 +4,11 @@ import torch
 from torch.autograd import Function
 from torch.nn.modules.module import Module
 from torch.nn.functional import avg_pool2d, max_pool2d
-from ._ext import roi_align
+
+try:
+    from . import roi_align_cuda
+except ImportError:
+    roi_align_cuda = None
 
 
 # TODO use save_for_backward instead
@@ -23,10 +27,10 @@ class RoIAlignFunction(Function):
 
         output = features.new(num_rois, num_channels, self.aligned_height, self.aligned_width).zero_()
         if features.is_cuda:
-            roi_align.roi_align_forward_cuda(self.aligned_height,
-                                             self.aligned_width,
-                                             self.sampling_ratio, features,
-                                             sample_indices, rois, output, features.device.index)
+            roi_align_cuda.roi_align_forward_cuda(self.aligned_height,
+                                                  self.aligned_width,
+                                                  self.sampling_ratio, features,
+                                                  sample_indices, rois, output, features.device.index)
         else:
             raise NotImplementedError
 
@@ -43,11 +47,11 @@ class RoIAlignFunction(Function):
 
         grad_input = self.rois.new(batch_size, num_channels, data_height,
                                    data_width).zero_()
-        roi_align.roi_align_backward_cuda(self.aligned_height,
-                                          self.aligned_width,
-                                          self.sampling_ratio, grad_output,
-                                          sample_indices, rois,
-                                          grad_input, grad_output.device.index)
+        roi_align_cuda.roi_align_backward_cuda(self.aligned_height,
+                                               self.aligned_width,
+                                               self.sampling_ratio, grad_output,
+                                               sample_indices, rois,
+                                               grad_input, grad_output.device.index)
 
         # print grad_input
 

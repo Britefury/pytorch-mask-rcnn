@@ -1,10 +1,13 @@
-import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.autograd import Function
 
-from ._ext import crop_and_resize as _backend
+from . import crop_and_resize_cpu
+try:
+    from . import crop_and_resize_cuda
+except ImportError:
+    crop_and_resize_cuda = None
 
 
 class CropAndResizeFunction(Function):
@@ -20,11 +23,11 @@ class CropAndResizeFunction(Function):
                             dtype=torch.float, device=image.device)
 
         if image.is_cuda:
-            status = _backend.crop_and_resize_gpu_forward(
+            status = crop_and_resize_cuda.crop_and_resize_forward_cuda(
                 image, boxes, box_ind,
                 self.extrapolation_value, self.crop_height, self.crop_width, crops, image.device.index)
         else:
-            status = _backend.crop_and_resize_forward(
+            status = crop_and_resize_cpu.crop_and_resize_forward_cpu(
                 image, boxes, box_ind,
                 self.extrapolation_value, self.crop_height, self.crop_width, crops)
         if status == -1:
@@ -43,11 +46,11 @@ class CropAndResizeFunction(Function):
         grad_image = torch.zeros(self.im_size, dtype=grad_outputs.dtype, device=grad_outputs.device)
 
         if grad_outputs.is_cuda:
-            _backend.crop_and_resize_gpu_backward(
+            crop_and_resize_cuda.crop_and_resize_backward_cuda(
                 grad_outputs, boxes, box_ind, grad_image, grad_outputs.device.index
             )
         else:
-            _backend.crop_and_resize_backward(
+            crop_and_resize_cpu.crop_and_resize_backward_cpu(
                 grad_outputs, boxes, box_ind, grad_image
             )
 

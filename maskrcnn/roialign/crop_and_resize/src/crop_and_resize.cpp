@@ -1,6 +1,6 @@
-#include <TH/TH.h>
-#include <stdio.h>
-#include <math.h>
+#include <torch/extension.h>
+#include <vector>
+#include <tuple>
 
 
 void CropAndResizePerBox(
@@ -112,44 +112,42 @@ void CropAndResizePerBox(
 }
 
 
-int crop_and_resize_forward(
-    THFloatTensor * image,
-    THFloatTensor * boxes,      // [y1, x1, y2, x2]
-    THIntTensor * box_index,    // range in [0, batch_size)
-    const float extrapolation_value,
-    const int crop_height,
-    const int crop_width,
-    THFloatTensor * crops
-) {
-    const int batch_size = image->size[0];
-    const int depth = image->size[1];
-    const int image_height = image->size[2];
-    const int image_width = image->size[3];
+int crop_and_resize_forward_cpu(at::Tensor image,
+                                at::Tensor boxes,      // [y1, x1, y2, x2]
+                                at::Tensor box_index,  // range in [0, batch_size)
+                                const float extrapolation_value,
+                                const int crop_height,
+                                const int crop_width,
+                                at::Tensor crops) {
+    const auto batch_size = image.size(0);
+    const auto depth = image.size(1);
+    const auto image_height = image.size(2);
+    const auto image_width = image.size(3);
 
-    const int num_boxes = boxes->size[0];
+    const auto num_boxes = boxes.size(0);
 
-    // init output space
-    if ((crops->size[0] != batch_size) ||
-        (crops->size[1] != depth) ||
-        (crops->size[2] != crop_height) ||
-        (crops->size[3] != crop_width)) {
+    // Check output size
+    if ((crops.size(0) != num_boxes) ||
+        (crops.size(1) != depth) ||
+        (crops.size(2) != crop_height) ||
+        (crops.size(3) != crop_width)) {
         return -1;
     }
 
     // crop_and_resize for each box
     CropAndResizePerBox(
-        THFloatTensor_data(image),
+        image.data<float>(),
         batch_size,
         depth,
         image_height,
         image_width,
 
-        THFloatTensor_data(boxes),
-        THIntTensor_data(box_index),
+        boxes.data<float>(),
+        box_index.data<int>(),
         0,
         num_boxes,
 
-        THFloatTensor_data(crops),
+        crops.data<float>(),
         crop_height,
         crop_width,
         extrapolation_value
@@ -159,22 +157,20 @@ int crop_and_resize_forward(
 }
 
 
-void crop_and_resize_backward(
-    THFloatTensor * grads,
-    THFloatTensor * boxes,      // [y1, x1, y2, x2]
-    THIntTensor * box_index,    // range in [0, batch_size)
-    THFloatTensor * grads_image // resize to [bsize, c, hc, wc]
-)
-{   
+void crop_and_resize_backward_cpu(at::Tensor grads,
+                                  at::Tensor boxes,      // [y1, x1, y2, x2]
+                                  at::Tensor box_index,  // range in [0, batch_size)
+                                  at::Tensor grads_image // resize to [bsize, c, hc, wc]
+                                  ) {
     // shape
-    const int batch_size = grads_image->size[0];
-    const int depth = grads_image->size[1];
-    const int image_height = grads_image->size[2];
-    const int image_width = grads_image->size[3];
+    const auto batch_size = grads_image.size(0);
+    const auto depth = grads_image.size(1);
+    const auto image_height = grads_image.size(2);
+    const auto image_width = grads_image.size(3);
 
-    const int num_boxes = grads->size[0];
-    const int crop_height = grads->size[2];
-    const int crop_width = grads->size[3];
+    const auto num_boxes = grads.size(0);
+    const auto crop_height = grads.size(2);
+    const auto crop_width = grads.size(3);
 
     // n_elements
     const int image_channel_elements = image_height * image_width;
@@ -184,10 +180,10 @@ void crop_and_resize_backward(
     const int crop_elements = depth * channel_elements;
 
     // data pointer
-    const float * grads_data = THFloatTensor_data(grads);
-    const float * boxes_data = THFloatTensor_data(boxes);
-    const int * box_index_data = THIntTensor_data(box_index);
-    float * grads_image_data = THFloatTensor_data(grads_image);
+    const float * grads_data = grads.data<float>();
+    const float * boxes_data = boxes.data<float>();
+    const int * box_index_data = box_index.data<int>();
+    float * grads_image_data = grads_image.data<float>();
 
     for (int b = 0; b < num_boxes; ++b) {
         const float * box = boxes_data + b * 4;
@@ -251,4 +247,9 @@ void crop_and_resize_backward(
             }   // end x
         }   // end y
     }   // end b
+}
+
+PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+  m.def("crop_and_resize_forward_cpu", &crop_and_resize_forward_cpu, "Crop and resize forward pass - CPU");
+  m.def("crop_and_resize_backward_cpu", &crop_and_resize_backward_cpu, "Crop and resize backward pass - CPU");
 }
